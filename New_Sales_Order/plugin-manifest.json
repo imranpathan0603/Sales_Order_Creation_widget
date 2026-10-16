@@ -3,16 +3,13 @@
     "en"
   ],
   "service": "FINANCE",
-  "whiteListedDomains": [],
   "modules": {
     "widgets": [
       {
         "location": "salesorder.list.button",
         "name": "New Sales Order",
         "widget_type": "modal",
-
-        "url": "/app/index.html",
-        "logo": "/app/img/logo.png"
+        "url": "/app/index.html"
       }
     ]
   },
@@ -28,7 +25,10 @@
         "ZohoBooks.salesorders.CREATE",
         "ZohoBooks.salesorders.READ",
         "ZohoBooks.contacts.READ",
-        "ZohoBooks.settings.READ"
+        "ZohoBooks.settings.READ",
+        "ZohoBooks.contacts.CREATE",
+        "ZohoBooks.accountants.READ"
       ]
     }
-  ]}
+  ]
+}
