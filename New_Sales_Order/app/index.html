@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>New Sales Order</title>
+  <script src="https://static.zohocdn.com/zohofinance/v1.0/zf_sdk.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Loading / fatal error -->
+  <div id="loading" class="center-panel">
+    <div class="spinner" aria-hidden="true"></div>
+    <p id="loadingText">Loading Zoho Books data…</p>
+    <button type="button" id="btnRetry" class="btn" hidden>Retry</button>
+  </div>
+
+  <!-- Main form: sticky header + scrollable body + sticky footer -->
+  <div id="app" hidden>
+    <header class="top">
+      <h1>New Sales Order</h1>
+      <button type="button" id="btnCancel" class="btn ghost">Cancel</button>
+    </header>
+
+    <div id="body">
+      <div id="banner" class="banner" role="alert" hidden></div>
+
+      <div id="uncertain" class="banner warn" hidden>
+        <strong>The server did not confirm whether the order was created.</strong>
+        <p>Submit is locked so the order is not created twice. Check Zoho Books for this customer's recent orders before doing anything else.</p>
+        <div class="row-actions">
+          <button type="button" id="btnCheck" class="btn">Check recent orders</button>
+          <button type="button" id="btnUnlock" class="btn ghost">It was not created – unlock form</button>
+        </div>
+        <div id="recent"></div>
+      </div>
+
+      <form id="soForm" novalidate autocomplete="off">
+
+        <section class="card">
+          <h2>Order details</h2>
+          <div class="grid">
+            <div class="field span2">
+              <label for="customer">Customer name <span class="req">*</span></label>
+              <div class="inline">
+                <input type="text" id="customer" placeholder="Search customers by name…" autocomplete="off">
+                <button type="button" id="customerClear" class="icon-btn" title="Clear customer" hidden>&times;</button>
+              </div>
+              <div class="hint" id="customerHint"></div>
+            </div>
+
+            <div class="field" id="locWrap" hidden>
+              <label for="location">Location <span class="req">*</span></label>
+              <select id="location"></select>
+            </div>
+
+            <div class="field">
+              <label for="soNumber">Sales order #</label>
+              <input type="text" id="soNumber" placeholder="Auto-generated">
+              <div class="hint">Leave blank to use Zoho Books auto-numbering.</div>
+            </div>
+
+            <div class="field">
+              <label for="refNumber">Reference #</label>
+              <input type="text" id="refNumber" maxlength="100">
+            </div>
+
+            <div class="field">
+              <label for="soDate">Sales order date <span class="req">*</span></label>
+              <input type="date" id="soDate">
+            </div>
+
+            <div class="field">
+              <label for="shipDate">Expected shipment date</label>
+              <input type="date" id="shipDate">
+            </div>
+
+            <div class="field">
+              <label for="payTerms">Payment terms (days)</label>
+              <input type="text" id="payTerms" inputmode="numeric" placeholder="0 = Due on receipt">
+            </div>
+
+            <div class="field">
+              <label for="delivery">Delivery method</label>
+              <input type="text" id="delivery" maxlength="100">
+            </div>
+
+            <div class="field" id="spWrap" hidden>
+              <label for="salesperson">Salesperson</label>
+              <select id="salesperson"></select>
+            </div>
+
+            <div class="field" id="plWrap" hidden>
+              <label for="priceList">Price list</label>
+              <select id="priceList"></select>
+            </div>
+
+            <div class="field">
+              <label for="currencyText">Currency</label>
+              <input type="text" id="currencyText" readonly>
+              <div class="hint">Follows the selected customer.</div>
+            </div>
+
+            <div class="field" id="exchWrap" hidden>
+              <label for="exchRate">Exchange rate <span class="req">*</span></label>
+              <input type="text" id="exchRate" inputmode="decimal">
+            </div>
+          </div>
+        </section>
+
+        <section class="card" id="cfCard" hidden>
+          <h2>Custom fields</h2>
+          <div class="grid" id="cfGrid"></div>
+          <div class="hint">Custom fields are read from your most recent sales order.</div>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <h2>Items</h2>
+            <div class="opts">
+              <label class="chk"><input type="checkbox" id="inclusive"> Rates are tax inclusive</label>
+              <label class="sel">Discount
+                <select id="discLevel">
+                  <option value="item_level">At line item level</option>
+                  <option value="entity_level">At transaction level</option>
+                </select>
+              </label>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table class="items" id="items">
+              <thead>
+                <tr>
+                  <th class="c-n">#</th>
+                  <th class="c-item">Item details</th>
+                  <th class="c-brand">Brand</th>
+                  <th class="c-brand">Sub-brand</th>
+                  <th class="c-num">Quantity</th>
+                  <th class="c-num">Rate</th>
+                  <th class="c-disc" id="thDisc">Discount</th>
+                  <th class="c-tax">Tax</th>
+                  <th class="c-amt">Amount</th>
+                  <th class="c-x"></th>
+                </tr>
+              </thead>
+              <!-- one <tbody> per item row is added by extension.js -->
+            </table>
+          </div>
+          <button type="button" id="btnAddRow" class="btn ghost">+ Add new row</button>
+          <div class="hint" id="rowNotice"></div>
+        </section>
+
+        <section class="card two-col">
+          <div>
+            <div class="field">
+              <label for="notes">Customer notes</label>
+              <textarea id="notes" rows="3"></textarea>
+            </div>
+            <div class="field">
+              <label for="terms">Terms &amp; conditions</label>
+              <textarea id="terms" rows="3"></textarea>
+            </div>
+          </div>
+
+          <div class="totals" aria-live="polite">
+            <div class="t-row" id="entityDiscRow" hidden>
+              <label for="entityDisc">Discount (e.g. 10 or 10%)</label>
+              <input type="text" id="entityDisc" inputmode="decimal">
+              <label class="chk small"><input type="checkbox" id="beforeTax" checked> Apply before tax</label>
+            </div>
+            <div class="t-row"><span>Sub total</span><b id="tSub">0.00</b></div>
+            <div class="t-row" id="tDiscRow" hidden><span>Discount</span><b id="tDisc">0.00</b></div>
+            <div id="tTaxes"></div>
+            <div class="t-row">
+              <label for="shipping">Shipping charges</label>
+              <input type="text" id="shipping" inputmode="decimal" placeholder="0.00">
+            </div>
+            <div class="t-row">
+              <label for="adjustment">Adjustment</label>
+              <input type="text" id="adjustment" inputmode="decimal" placeholder="0.00">
+            </div>
+            <div class="t-row">
+              <label for="adjDesc">Adjustment note</label>
+              <input type="text" id="adjDesc" maxlength="100">
+            </div>
+            <div class="t-row grand"><span>Total (<span id="tCur"></span>)</span><b id="tTotal">0.00</b></div>
+            <div class="hint">Estimated here. Zoho Books calculates the final totals when the order is created.</div>
+          </div>
+        </section>
+
+        <details class="card" id="addrCard">
+          <summary>Billing &amp; shipping address</summary>
+          <div class="two-col addr">
+            <fieldset id="fsBilling"><legend>Billing address</legend></fieldset>
+            <fieldset id="fsShipping"><legend>Shipping address</legend></fieldset>
+          </div>
+          <div class="hint">Filled from the customer. Only addresses you edit here are sent with the order.</div>
+        </details>
+
+        <div id="summary" class="banner" role="alert" hidden></div>
+      </form>
+    </div>
+
+    <footer class="bar">
+      <span id="status" class="status" aria-live="polite"></span>
+      <button type="button" id="btnSubmit" class="btn primary">Create sales order</button>
+    </footer>
+  </div>
+
+  <!-- Success -->
+  <div id="success" class="center-panel" hidden>
+    <div class="tick" aria-hidden="true">&#10003;</div>
+    <h2 id="okTitle">Sales order created</h2>
+    <p id="okDetail"></p>
+    <p class="hint" id="okNote"></p>
+    <button type="button" id="btnClose" class="btn primary">Close</button>
+  </div>
+
+  <!-- Shared dropdown for customer / item lookups -->
+  <div id="combo" class="combo" role="listbox" hidden></div>
+
+  <!-- ========== NEW: New Customer modal ========== -->
+  <div id="newCustModal" class="modal-overlay" hidden>
+    <div class="modal-box modal-box-lg" role="dialog" aria-modal="true" aria-labelledby="newCustTitle">
+      <div class="modal-head">
+        <h3 id="newCustTitle">New Customer</h3>
+        <button type="button" class="modal-close" id="newCustClose" aria-label="Close">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="nc-inline">
+          <span class="nc-inline-label">Customer Type</span>
+          <label class="radio"><input type="radio" name="nc_type" value="business" checked> Business</label>
+          <label class="radio"><input type="radio" name="nc_type" value="individual"> Individual</label>
+        </div>
+
+        <div class="nc-grid">
+          <div class="nc-field">
+            <label for="nc_salutation">Salutation</label>
+            <select id="nc_salutation">
+              <option value="">—</option>
+              <option value="Mr.">Mr.</option>
+              <option value="Mrs.">Mrs.</option>
+              <option value="Ms.">Ms.</option>
+              <option value="Dr.">Dr.</option>
+            </select>
+          </div>
+
+          <div class="nc-field">
+            <label for="nc_firstName">First Name</label>
+            <input type="text" id="nc_firstName">
+          </div>
+
+          <div class="nc-field">
+            <label for="nc_lastName">Last Name <span class="req" id="nc_lastNameReq" hidden>*</span></label>
+            <input type="text" id="nc_lastName">
+          </div>
+
+          <div class="nc-field">
+            <label for="nc_companyName">Company Name <span class="req" id="nc_companyNameReq" hidden>*</span></label>
+            <input type="text" id="nc_companyName">
+          </div>
+
+          <div class="nc-field span2">
+            <label for="nc_displayName">Display Name <span class="req">*</span></label>
+            <input type="text" id="nc_displayName">
+            <div class="hint">This is what shows in the sales order.</div>
+          </div>
+
+          <div class="nc-field">
+            <label for="nc_email">Email Address</label>
+            <input type="email" id="nc_email">
+          </div>
+
+          <div class="nc-field">
+            <label for="nc_workPhone">Phone</label>
+            <input type="text" id="nc_workPhone">
+          </div>
+
+          <div class="nc-field">
+            <label for="nc_mobile">Mobile</label>
+            <input type="text" id="nc_mobile">
+          </div>
+
+          <div class="nc-field">
+            <label for="nc_currency">Currency</label>
+            <select id="nc_currency"></select>
+          </div>
+
+          <div class="nc-field">
+            <label for="nc_paymentTerms">Payment Terms</label>
+            <input type="text" id="nc_paymentTerms" inputmode="numeric" placeholder="0 = Due on Receipt">
+          </div>
+
+          <div class="nc-field">
+            <label for="nc_priceList">Price List</label>
+            <select id="nc_priceList"></select>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-foot">
+        <span class="status" id="newCustStatus"></span>
+        <button type="button" class="btn primary" id="newCustSave">Save</button>
+        <button type="button" class="btn" id="newCustCancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/extension.js"></script>
+</body>
+</html>

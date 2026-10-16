@@ -1,0 +1,34 @@
+{
+  "locale": [
+    "en"
+  ],
+  "service": "FINANCE",
+  "whiteListedDomains": [],
+  "modules": {
+    "widgets": [
+      {
+        "location": "salesorder.list.button",
+        "name": "New Sales Order",
+        "widget_type": "modal",
+
+        "url": "/app/index.html",
+        "logo": "/app/img/logo.png"
+      }
+    ]
+  },
+  "config": [],
+  "usedConnections": [
+    {
+      "connectionLinkName": "bookconnectionwigdet",
+      "connectionName": "bookconnectionwigdet",
+      "serviceName": "zohobooks",
+      "isUserDefinedService": false,
+      "userAccess": false,
+      "scope": [
+        "ZohoBooks.salesorders.CREATE",
+        "ZohoBooks.salesorders.READ",
+        "ZohoBooks.contacts.READ",
+        "ZohoBooks.settings.READ"
+      ]
+    }
+  ]}
