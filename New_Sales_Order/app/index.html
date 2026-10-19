@@ -1,4 +1,4 @@
-  <!DOCTYPE html>
+<!DOCTYPE html>
   <html lang="en">
   <head>
     <meta charset="UTF-8">
@@ -38,7 +38,6 @@
         <form id="soForm" novalidate autocomplete="off">
 
           <!-- ========== Order details ========== -->
-          <!-- ========== Order details ========== -->
           <section class="so-card">
             <div class="so-row">
               <label class="so-label" for="customer">Customer Name<span class="req">*</span></label>
@@ -68,14 +67,20 @@
               </div>
             </div>
           
+            <div class="so-row" id="posWrap">
+              <label class="so-label" for="placeOfSupply">Place of Supply<span class="req">*</span></label>
+              <div class="so-field">
+                <select id="placeOfSupply" class="w-sm"></select>
+              </div>
+            </div>
+            
             <div class="so-row" id="locWrap" hidden>
               <label class="so-label" for="location">Location</label>
               <div class="so-field">
                 <select id="location" class="w-sm"></select>
                 <div class="hint" id="sourceHint"></div>
               </div>
-            </div>
-          
+            </div>  
             <div class="so-divider"></div>
           
             <div class="so-row">
@@ -83,16 +88,16 @@
               <div class="so-field">
                 <div class="input-suffix w-sm">
                   <input type="text" id="soNumber" placeholder="Auto-generated">
-                  <button type="button" class="suffix-btn" title="Sales order preferences" tabindex="-1">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#2a62d6" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.9 19a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 5 8.9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9.5a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 15 5a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
-                  </button>
+                  <!-- <button type="button" class="suffix-btn" title="Sales order preferences" tabindex="-1"> -->
+                    <!-- <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#2a62d6" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.9 19a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 5 8.9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9.5a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 15 5a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg> -->
+                  <!-- </button> -->
                 </div>
                 <div class="hint">Leave blank to use Zoho Books auto-numbering.</div>
               </div>
             </div>
           
             <div class="so-row">
-              <label class="so-label" for="refNumber">Reference#&nbsp;<span class="info-dot" title="A reference number for this order, e.g. customer's PO">i</span></label>
+              <label class="so-label" for="refNumber">Reference#&nbsp;<span class="info-dot" title="Use this field to record any transaction numbers related to this transaction such as purchase order numbers.">i</span></label>
               <div class="so-field">
                 <input type="text" id="refNumber" maxlength="100" class="w-sm">
               </div>
@@ -174,10 +179,8 @@
               <div class="so-field">
                 <select id="contractSig">
                   <option value=""></option>
-                  <option value="Pending">Pending</option>
-                  <option value="Sent">Sent</option>
+                  <option value="Pending">Unsigned</option>
                   <option value="Signed">Signed</option>
-                  <option value="Declined">Declined</option>
                 </select>
               </div>
           
@@ -213,17 +216,18 @@
           </section>
 
           <!-- ========== Items ========== -->
-          <!-- ========== Items ========== -->
-          <!-- ========== Items ========== -->
           <section class="so-card items-card">
           
             <!-- Toolbar: Warehouse Location | Price List (same row) -->
+            <!-- Toolbar: Warehouse Location | Price List (same row) -->
             <div class="items-toolbar">
-              <div class="tb-field" id="locWrap" hidden>
+              <!-- NEW: Warehouse Location for the Item Table -->
+              <div class="tb-field" id="warehouseWrap" hidden>
                 <span class="tb-lbl">Warehouse Location</span>
-                <select id="location"></select>
+                <select id="itemLocation"></select>
               </div>
           
+              <!-- Price List -->
               <div class="tb-field" id="plWrap" hidden>
                 <span class="tb-icon" aria-hidden="true">
                   <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
@@ -263,7 +267,6 @@
                     <th class="c-drag"></th>
                     <th class="c-img"></th>
                     <th class="c-item">Item Details</th>
-                    <th class="c-brand">Brand</th>
                     <th class="c-num">Quantity</th>
                     <th class="c-num">Rate <span class="info-dot" title="Unit rate">i</span></th>
                     <th class="c-disc">Discount</th>
@@ -278,7 +281,7 @@
           
             <div class="items-actions">
               <button type="button" id="btnAddRow" class="btn-addrow">Add New Row<span class="caret">▾</span></button>
-              <button type="button" class="btn-bulk" tabindex="-1">Add Items in Bulk</button>
+              <button type="button" id="btnBulk" class="btn-bulk">Add Items in Bulk</button>
             </div>
             <div class="hint" id="rowNotice"></div>
           </section>
@@ -310,8 +313,8 @@
               <div class="t-row tds">
                 <label class="radio"><input type="radio" name="tds_tcs" value="tds" checked> TDS</label>
                 <label class="radio"><input type="radio" name="tds_tcs" value="tcs"> TCS</label>
-                <select disabled tabindex="-1"><option>Select a Tax</option></select>
-                <b class="muted">- 0.00</b>
+                <select id="tdsTax"></select>
+                <b id="tTds" class="muted">- 0.00</b>
               </div>
 
               <div class="t-row" id="entityDiscRow" hidden>
@@ -624,6 +627,134 @@
       </div>
     </div>
 
+
+    <!-- Reporting Tags popup -->
+<div id="tagModal" class="modal-overlay" hidden>
+  <div class="modal-box" style="max-width:720px" role="dialog" aria-modal="true">
+    <div class="modal-head"><h3>Reporting Tags</h3><button type="button" class="modal-close" id="tagClose" aria-label="Close">&times;</button></div>
+    <div class="modal-body"><div id="tagGrid" class="tg-grid"></div></div>
+    <div class="modal-foot">
+      <span class="status" id="tagStatus"></span>
+      <button type="button" class="btn primary" id="tagSave">Save</button>
+      <button type="button" class="btn" id="tagCancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- HSN/SAC popup -->
+<div id="hsnModal" class="modal-overlay" hidden>
+  <div class="modal-box" style="max-width:420px" role="dialog" aria-modal="true">
+    <div class="modal-head"><h3 id="hsnLbl">HSN Code</h3><button type="button" class="modal-close" id="hsnClose" aria-label="Close">&times;</button></div>
+
+    <div class="modal-body"><div class="field hsn-wrap">
+      <input type="text" id="hsnInput" placeholder="Type 3+ characters to search" autocomplete="off">
+      <div class="hsn-dd" id="hsnDd" role="listbox" hidden></div>
+    </div></div>
+
+    <div class="modal-foot">
+      <span class="status" id="hsnStatus"></span>
+      <button type="button" class="btn primary" id="hsnSave">Save</button>
+      <button type="button" class="btn" id="hsnCancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+
+<div id="cfmModal" class="modal-overlay pt-overlay" hidden>
+  <div class="modal-box" style="max-width:420px" role="dialog" aria-modal="true">
+    <div class="modal-head"><h3>Confirm</h3></div>
+    <div class="modal-body"><p id="cfmMsg" style="margin:0"></p></div>
+    <div class="modal-foot">
+      <button type="button" class="btn primary" id="cfmYes">Yes, apply</button>
+      <button type="button" class="btn" id="cfmNo">Cancel</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- ========== Tax guidance modal (replaces old create form) ========== -->
+<div id="txModal" class="modal-overlay pt-overlay" hidden>
+  <div class="modal-box" style="max-width:560px" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <h3 id="txTitle">Create TDS in Zoho Books</h3>
+      <button type="button" class="pt-x" id="txClose" aria-label="Close">&times;</button>
+    </div>
+    <div class="modal-body" id="txModalBody">
+      <!-- content injected by openTaxModal() -->
+    </div>
+    <div class="modal-foot" style="justify-content:flex-start">
+      <!-- buttons injected by openTaxModal() -->
+    </div>
+  </div>
+</div>
+
+
+<!-- ========== Add Items in Bulk ========== -->
+<div id="bkModal" class="modal-overlay" hidden>
+  <div class="modal-box bk-box" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <h3>Add Items in Bulk</h3>
+      <button type="button" class="modal-close" id="bkClose" aria-label="Close">&times;</button>
+    </div>
+    <div class="bk-main">
+      <div class="bk-left">
+        <div class="bk-filter">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#2a62d6" stroke-width="2" stroke-linejoin="round"><path d="M3 4h18l-7 8v6l-4 2v-8z"/></svg>
+          <div class="bk-cat" id="bkCatWrap">
+            <button type="button" id="bkCatBtn" class="bk-cat-btn"><span id="bkCatLbl">Category</span><span class="cust-chev"></span></button>
+            <div class="bk-cat-panel" id="bkCatPanel" hidden>
+              <div class="cust-search">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8a94a6" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+                <input type="text" id="bkCatSearch" placeholder="Search" autocomplete="off">
+              </div>
+              <div class="bk-cat-list" id="bkCatList"></div>
+              <button type="button" class="btn bk-apply" id="bkCatApply">Apply</button>
+            </div>
+          </div>
+          <label class="bk-sub"><input type="checkbox" id="bkSub"> Include sub-categories</label>
+        </div>
+        <input type="text" id="bkSearch" class="bk-search" placeholder="Search by item name, SKU, HSN/SAC, barcode…" autocomplete="off">
+        <div class="bk-list" id="bkList" role="listbox"></div>
+      </div>
+
+      <div class="bk-right">
+        <div class="bk-rhead">
+          <div class="bk-rt">Selected Items <span class="bk-badge" id="bkCount">0</span></div>
+          <div class="bk-tq">Total Quantity: <b id="bkQty">0</b></div>
+        </div>
+        <div class="bk-sel" id="bkSel"></div>
+        <div class="bk-foot">
+          <button type="button" class="btn primary" id="bkAdd">Add Items</button>
+          <button type="button" class="btn" id="bkCancel">Cancel</button>
+          <span class="status" id="bkStatus"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== New Tax (GST) ========== -->
+<div id="ntModal" class="modal-overlay pt-overlay" hidden>
+  <div class="modal-box" style="max-width:520px" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <h3>New Tax</h3>
+      <button type="button" class="pt-x" id="ntClose" aria-label="Close">&times;</button>
+    </div>
+    <div class="modal-body nc-body">
+      <div class="nc-row"><label class="nc-l req" for="nt_name">Tax Name*</label>
+        <div class="nc-c"><input type="text" id="nt_name" class="w-main" maxlength="100" autocomplete="off"></div></div>
+      <div class="nc-row"><label class="nc-l req" for="nt_rate">Rate (%)*</label>
+        <div class="nc-c"><div class="addon addon-r w-main"><input type="text" id="nt_rate" inputmode="decimal" autocomplete="off"><span class="addon-t">%</span></div></div></div>
+      <div class="nc-row"><label class="nc-l" for="nt_type">Tax Type</label>
+        <div class="nc-c"><select id="nt_type" class="w-main"></select></div></div>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn primary" id="ntSave">Save</button>
+      <button type="button" class="btn" id="ntCancel">Cancel</button>
+      <span class="status" id="ntStatus"></span>
+    </div>
+  </div>
+</div>
     <script src="js/extension.js"></script>
   </body>
   </html>

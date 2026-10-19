@@ -21,14 +21,16 @@ console.log('%c[SOWidget] file loaded', 'color:#1d8a4e;font-weight:bold');
     customerCacheTtlMs: 24 * 60 * 60 * 1000, // IndexedDB customer list is re-synced in the background after this age
     gstMode: 'auto',        // 'auto' (India org detection) | 'on' | 'off' - controls GST fields in New Customer / New Item
     phoneWithCode: true,    // send phone numbers as "+91 9999999999"; false sends the number only
-    customFieldOverrides: []
+    customFieldOverrides: [],
+    shipGstFields: null,
+    uiApiRoot: 'https://books.zoho.com/api/v3'
   };
 
   /* ================= STATE ================= */
   var S = {
     root: '', orgId: '',
     currencies: [], baseCurrency: null, currency: null,
-    taxes: [], taxMap: {},
+    taxes: [], taxMap: {}, tdsTaxes: [], tcsTaxes: [], taxesLoaded: false,
     locations: [], salespersons: [], pricebooks: [], pricebook: null,
     tags: [], cfDefs: [],
     customer: null, contact: null,
@@ -222,8 +224,7 @@ function cfDefByLabel(label) {
       var t = rb * b.pct / 100;
       sumBase += rb;
       taxTotal += t;
-      if (b.id && t) out.taxes[b.id] = (out.taxes[b.id] || 0) + t;
-    });
+      if (b.id) out.taxes[b.id] = (out.taxes[b.id] || 0) + t;    });
 
     out.discountTotal += entD;
     var total = sumBase + taxTotal - (c.beforeTax ? 0 : entD) + (c.shipping || 0) + (c.adjustment || 0);
@@ -241,8 +242,16 @@ function cfDefByLabel(label) {
     Object.keys(query || {}).forEach(function (k) {
       if (query[k] !== undefined && query[k] !== null && query[k] !== '') q.push({ key: k, value: String(query[k]) });
     });
+    // var opts = {
+    //   // url: S.root + path, method: method, url_query: q,
+    //   url: /^https?:/.test(path) ? path : S.root + path,
+    //   connection_link_name: CONFIG.connectionLinkName
+    // };
+
     var opts = {
-      url: S.root + path, method: method, url_query: q,
+      url: /^https?:/.test(path) ? path : S.root + path,
+      method: method,
+      url_query: q,
       connection_link_name: CONFIG.connectionLinkName
     };
     if (body) {
@@ -326,17 +335,125 @@ function cfDefByLabel(label) {
     });
   }
 
-  function loadTaxes() {
-    return api('GET', '/settings/taxes').then(function (j) {
-      S.taxes = firstArray(j, 'taxes').filter(function (t) { return t.status !== 'inactive' && t.is_inactive !== true; });
+  function txClassify(t) {
+    if (t.is_tds === true) return 'tds';
+    if (t.is_tcs === true) return 'tcs';
+    var re = /(^|_)(tds|tcs)($|_)/, kind = 'tax';
+    [t.tax_type, t.tax_specific_type].forEach(function (v) {
+      var m = re.exec(String(v || '').toLowerCase());
+      if (m && kind === 'tax') kind = m[2];
+    });
+    return kind;
+  }
+
+  function txActive(t) {
+    return t.status !== 'inactive' && t.is_inactive !== true;
+  }
+
+  function txPickList(j, key) {
+    if (key && Array.isArray(j[key])) return j[key];
+    var out = null;
+    Object.keys(j || {}).forEach(function (k) {
+      if (!out && Array.isArray(j[k]) && j[k].length && j[k][0] && j[k][0].tax_id !== undefined) out = j[k];
+    });
+    return out || [];
+  }
+
+  function txFetchAll(path, extra, key) {
+    var all = [], page = 1;
+    function next() {
+      var q = { per_page: 200, page: page };
+      Object.keys(extra || {}).forEach(function (k) { q[k] = extra[k]; });
+      return api('GET', path, q).then(function (j) {
+        var list = txPickList(j, key);
+        all = all.concat(list);
+        if (j.page_context && j.page_context.has_more_page) {
+          if (!list.length) throw mkErr('data', 'Tax list pagination reported more results but returned an empty page.');
+          page++;
+          return next();
+        }
+        return all;
+      });
+    }
+    return next();
+  }
+
+  function txDebugTaxes(rows) {
+    var kinds = {};
+    rows.forEach(function (t) {
+      var k = (t.tax_type || '-') + ' | ' + (t.tax_specific_type || '-');
+      kinds[k] = (kinds[k] || 0) + 1;
+    });
+    console.log('%c[SOWidget] /settings/taxes: ' + rows.length + ' rows. "tax_type | tax_specific_type" counts:', 'color:#7a3db8', kinds);
+    console.log('[SOWidget] classified -> regular:', S.taxes.length, 'TDS:', S.tdsTaxes.length, 'TCS:', S.tcsTaxes.length);
+    if (rows[0]) console.log('[SOWidget] first raw tax row (check the field names):', rows[0]);
+  }
+
+  // TDS / TCS rates come from the same /settings/taxes endpoint, but only when the
+  // is_tds_request / is_tcs_request flag is sent (same as the Deluge test calls).
+  function txLoadWithholding(kind) {
+    var extra = { filter_by: 'Taxes.All', usestate: 'false', per_page: 100 };
+    extra[kind === 'tds' ? 'is_tds_request' : 'is_tcs_request'] = 'true';
+    return txFetchAll('/settings/taxes', extra, '').then(function (list) {
+      list = list.filter(txActive);
+      if (CONFIG.debug) {
+        console.log('%c[SOWidget] ' + kind.toUpperCase() + ' rates loaded: ' + list.length, 'color:#7a3db8', list);
+      }
+      return list;
+    }).catch(function (e) {
+      console.warn('[SOWidget] ' + kind.toUpperCase() + ' list failed:', e);
+      return [];
+    });
+  }
+
+  function txMerge(target, list) {
+    list.forEach(function (t) {
+      var dup = target.some(function (x) { return String(x.tax_id) === String(t.tax_id); });
+      if (!dup) target.push(t);
+    });
+  }
+
+  function loadTaxes(force) {
+    if (S.taxesLoaded && !force) return Promise.resolve();
+    return Promise.all([
+      txFetchAll('/settings/taxes', {}, 'taxes'),
+      txLoadWithholding('tds'),
+      txLoadWithholding('tcs')
+    ]).then(function (res) {
+      var rows = res[0];
+      S.taxes = [];
+      S.tdsTaxes = [];
+      S.tcsTaxes = [];
+
+      // regular list: anything the plain call marks as TDS/TCS is routed to the right list
+      rows.filter(txActive).forEach(function (t) {
+        var kind = txClassify(t);
+        if (kind === 'tds') txMerge(S.tdsTaxes, [t]);
+        else if (kind === 'tcs') txMerge(S.tcsTaxes, [t]);
+        else S.taxes.push(t);
+      });
+
+      // dedicated TDS / TCS calls
+      txMerge(S.tdsTaxes, res[1]);
+      txMerge(S.tcsTaxes, res[2]);
+
       S.taxMap = {};
       S.taxes.forEach(function (t) { S.taxMap[String(t.tax_id)] = t; });
+      S.taxesLoaded = true;
+      if (CONFIG.debug) txDebugTaxes(rows);
     });
   }
 
   function loadLocations() {
-    return api('GET', '/locations').then(function (j) {
-      S.locations = firstArray(j, 'locations').filter(function (l) { return l.status !== 'inactive' && l.is_active !== false; });
+    return api('GET', '/locations', { is_hierarchical_response: 'true' }).then(function (j) {
+      S.locations = firstArray(j, 'locations')
+        .filter(function (l) { return !l.parent_location_id && (l.depth || 0) === 0; })       // parents only
+        .filter(function (l) { return l.is_location_active !== false && l.status !== 'inactive'; })
+        .map(function (l) {
+          l.is_primary = !!l.is_primary_location;
+          l.children = (l.child_locations || []).filter(function (c) { return c.is_location_active !== false; });
+          return l;
+        });
     });
   }
 
@@ -573,24 +690,65 @@ function cfDefByLabel(label) {
   }
 
   function updateSourceHint() {
-    var h = $('sourceHint');
-    if (!h) return;
-    var sel = $('location');
-    if (!sel) return;
+    var h = $('sourceHint'), sel = $('location');
+    if (!h || !sel) return;
     var loc = S.locations.filter(function (l) { return String(l.location_id) === sel.value; })[0];
-    h.textContent = (loc && (loc.state || loc.state_code))
-      ? 'Source of Supply: ' + (loc.state || loc.state_code)
-      : '';
+    h.textContent = (loc && locState(loc)) ? 'Source of Supply: ' + locState(loc) : '';
   }
 
   /* ================= ITEM ROWS ================= */
+  function taxIsGroup(t) {
+    return t.tax_type === 'tax_group' || /^gst\d/i.test(String(t.tax_name || ''));
+  }
+  var TAX_EX = [
+    { key: 'nontaxable', label: 'Non-Taxable', re: /non[\s-]?taxable/i, desc: '' },
+    { key: 'outofscope', label: 'Out of Scope', re: /out\s*of\s*scope/i,
+      desc: "Supplies on which you don't charge any GST or include them in the returns." },
+    { key: 'nongst', label: 'Non-GST Supply', re: /non[\s-]?gst/i,
+      desc: 'Supplies which do not come under GST such as petroleum products and liquor.' }
+  ];
+
+  // real Zoho exemption id for one of the three options (null if the org has no match)
+  function exemptionFor(key) {
+    var def = TAX_EX.filter(function (x) { return x.key === key; })[0];
+    if (!def) return null;
+    var hit = (NC.exemptions || []).filter(function (e) {
+      return def.re.test(String(e.tax_exemption_code || '') + ' ' + String(e.description || ''));
+    })[0];
+    return hit ? String(hit.tax_exemption_id) : null;
+  }
+
+  function taxIsGroup(t) {
+    return t.tax_type === 'tax_group' || /^gst\d/i.test(String(t.tax_name || ''));
+  }
+
   function taxOptions(sel, selected) {
     sel.innerHTML = '';
-    mk('option', { value: '', text: 'No tax' }, sel);
-    S.taxes.forEach(function (t) {
-      mk('option', { value: String(t.tax_id), text: t.tax_name + ' [' + t.tax_percentage + '%]' }, sel);
-    });
-    sel.value = selected || '';
+    if (detectGst()) {
+      TAX_EX.forEach(function (x) {
+        var o = mk('option', { value: 'ex:' + x.key, text: x.label }, sel);
+        if (x.desc) o.dataset.desc = x.desc;
+      });
+    } else {
+      mk('option', { value: '', text: 'No tax' }, sel);
+    }
+    function add(list, group) {
+      list.forEach(function (t) {
+        var o = mk('option', { value: String(t.tax_id), text: t.tax_name + ' [' + t.tax_percentage + '%]' }, sel);
+        o.dataset.group = group;
+      });
+    }
+    add(S.taxes.filter(taxIsGroup), 'Tax Group');
+    add(S.taxes.filter(function (t) { return !taxIsGroup(t); }), 'Tax');
+    sel.value = selected || (detectGst() ? 'ex:nontaxable' : '');
+  }
+
+  function refreshTaxSelects() {
+    S.rows.forEach(function (r) { taxOptions(r.refs.tax, r.refs.tax.value); });
+  }
+
+  function refreshTaxSelects() {
+    S.rows.forEach(function (r) { taxOptions(r.refs.tax, r.refs.tax.value); });
   }
 
   function isPristine(r) {
@@ -599,19 +757,20 @@ function cfDefByLabel(label) {
   }
 
   function addRow() {
-    var row = { id: S.nextRowId++, item: null, rateTouched: false, refs: {}, tags: {} };
+    // var row = { id: S.nextRowId++, item: null, rateTouched: false, refs: {}, tags: {} };
+    var row = { id: S.nextRowId++, item: null, rateTouched: false, refs: {}, tags: {}, loc: '', pb: null };
     var tb = mk('tbody', { class: 'row' });
     var tr = mk('tr', { class: 'item-row' }, tb);
     var R = row.refs;
-  
+
     /* 1. Drag handle (holds hidden row number) */
     var tdDrag = mk('td', { class: 'c-drag' }, tr);
     R.n = mk('span', { class: 'row-n', text: '' }, tdDrag);
-  
+
     /* 2. Image placeholder */
     var tdImg = mk('td', { class: 'c-img' }, tr);
     mk('span', { class: 'item-img' }, tdImg);
-  
+
     /* 3. Item details */
     var tdI = mk('td', { class: 'c-item' }, tr);
     R.item = mk('input', {
@@ -620,64 +779,62 @@ function cfDefByLabel(label) {
     }, tdI);
     R.desc = mk('textarea', { placeholder: 'Description (optional)', rows: 1 }, tdI);
     R.err = mk('div', { class: 'row-err' }, tdI);
-  
+
+    /* NEW: X (clear item), three-dot menu, GOODS/SERVICE badge + HSN/SAC + Update */
+    R.itemX = mk('button', { type: 'button', class: 'item-x', title: 'Remove item', innerHTML: '&times;', hidden: true }, tdI);
+    R.itemMenu = mk('button', { type: 'button', class: 'item-dots', title: 'More', innerHTML: '&#8943;', hidden: true }, tdI);
+    R.meta = mk('div', { class: 'item-meta', hidden: true }, tdI);
+    R.badge = mk('span', { class: 'type-badge' }, R.meta);
+    R.hsnWrap = mk('span', {}, R.meta);
+    R.hsnTxt = mk('span', {}, R.hsnWrap);
+    R.hsnBtn = mk('button', { type: 'button', class: 'linkbtn', text: ' ✎ Update' }, R.hsnWrap);
+
     /* 4. Brand chip (Sub-brand removed from UI, stub kept hidden) */
-    var tdB = mk('td', { class: 'c-brand' }, tr);
-    var chipB = mk('div', { class: 'chip', 'data-empty': '1' }, tdB);
-    R.brand = mk('span', { class: 'chip-t' }, chipB);
-    mk('button', { type: 'button', class: 'chip-x', tabindex: '-1', innerHTML: '&times;' }, chipB);
-    mk('span', { class: 'chip-chev' }, tdB);
-    R.sub = mk('span', { hidden: true });   // stub – no longer in table
-  
+    /* Brand removed from UI; hidden stub keeps old references working */
+    R.brand = mk('span', {}, mk('span', { hidden: true }));
     /* 5. Quantity */
     var tdQ = mk('td', { class: 'c-num' }, tr);
     R.qty = mk('input', { type: 'text', inputMode: 'decimal', value: '1', class: 'cell-inp' }, tdQ);
-  
+
     /* 6. Rate */
     var tdR = mk('td', { class: 'c-num' }, tr);
     R.rate = mk('input', { type: 'text', inputMode: 'decimal', placeholder: '0.00', class: 'cell-inp' }, tdR);
-  
+
     /* 7. Discount (input + % suffix) */
     var tdD = mk('td', { class: 'c-disc' }, tr);
     var discW = mk('div', { class: 'disc-w' }, tdD);
     R.disc = mk('input', { type: 'text', inputMode: 'decimal', placeholder: '0', class: 'disc-inp' }, discW);
-    var pct = mk('span', { class: 'disc-pct', title: 'Amount or percentage' }, discW);
-    mk('span', { class: 'pct-t', text: '%' }, pct);
-    mk('span', { class: 'pct-c', text: '▾' }, pct);
-  
+    R.discMode = mk('select', { class: 'disc-mode', title: 'Percentage or amount' }, discW);
+    mk('option', { value: 'pct', text: '%' }, R.discMode);
+    R.discSym = mk('option', { value: 'amt', text: curSym() }, R.discMode);
+    R.discMode.addEventListener('change', function () { onRowChange(row); });
+
     /* 8. Tax select */
     var tdT = mk('td', { class: 'c-tax' }, tr);
     R.tax = mk('select', { class: 'cell-sel' }, tdT);
     taxOptions(R.tax, '');
-  
+    lookupEnhance(R.tax, { newLabel: 'New Tax', minWidth: 260, onNew: function () { openNewTaxModal(row); } });
+
     /* 9. Amount */
     R.amt = mk('td', { class: 'c-amt', text: money(0) }, tr);
-  
+
     /* 10. Delete */
     var tdX = mk('td', { class: 'c-x' }, tr);
     R.del = mk('button', { type: 'button', class: 'row-del', title: 'Remove row', innerHTML: '&times;' }, tdX);
-  
-    /* Reporting tags subrow — colspan now 10 */
+
+    /* Reporting tags subrow — colspan 10 */
     if (S.tags.length) {
       var sr = mk('tr', { class: 'subrow' }, tb);
-      var sc = mk('td', { colSpan: 10 }, sr);
-      var wrap = mk('div', { class: 'tags' }, sc);
-      S.tags.forEach(function (t) {
-        var lab = mk('label', { text: t.tag_name }, wrap);
-        var sel = mk('select', {}, lab);
-        mk('option', { value: '', text: '— none —' }, sel);
-        t.options.forEach(function (op) {
-          mk('option', { value: String(op.tag_option_id), text: op.tag_option_name || op.option_name || op.tag_option_id }, sel);
-        });
-        sel.addEventListener('change', function () { row.tags[t.tag_id] = sel.value; });
-      });
+      var sc = mk('td', { colSpan: 9 }, sr);
+      R.tagBtn = mk('button', { type: 'button', class: 'tag-toggle', innerHTML: '🏷 Reporting Tags <span class="tg-n"></span> ▾' }, sc);
+      R.tagBtn.addEventListener('click', function () { openTagModal(row); });
     }
-  
+
     row.el = tb;
     S.rows.push(row);
     $('items').appendChild(tb);
     renumber();
-  
+
     attachCombo(R.item, {
       fetch: function (q) {
         return api('GET', '/items', { search_text: q, filter_by: 'Status.Active', per_page: CONFIG.searchPageSize })
@@ -696,11 +853,34 @@ function cfDefByLabel(label) {
           row.item = null;
           R.brand.textContent = '';
           R.brand.parentNode.dataset.empty = '1';
+          showMeta(row);
         }
       },
       onSelect: function (it) { selectItem(row, it); }
     });
-  
+    /* Warehouse in Quantity column */
+    /* Warehouse in Quantity column */
+    if (S.locations.length) {
+      R.loc = mk('select', { class: 'row-sel' }, tdQ);
+      fillWh(R.loc, whList($('location').value), $('itemLocation').value);
+      row.loc = R.loc.value;
+            lookupEnhance(R.loc);
+      R.loc.addEventListener('change', function () { row.loc = R.loc.value; });
+    }
+/* Price list in Rate column */
+if (S.pricebooks.length) {
+  R.pl = mk('select', { class: 'row-sel' }, tdR);
+  fillSelect(R.pl, S.pricebooks.map(pbOpt), 'pricebook_id', 'name', 'Apply Price List',
+    S.pricebook ? String(S.pricebook.pricebook_id) : '');
+  row.pb = S.pricebook;
+  lookupEnhance(R.pl);
+  R.pl.addEventListener('change', function () {
+    row.pb = S.pricebooks.filter(function (p) { return String(p.pricebook_id) === R.pl.value; })[0] || null;
+    if (row.item) { row.rateTouched = false; refreshRate(row, true); }   // rate only, discount untouched
+    onRowChange(row);
+  });
+}
+
     R.qty.addEventListener('input', function () { refreshRate(row); onRowChange(row); });
     R.rate.addEventListener('input', function () { row.rateTouched = true; onRowChange(row); });
     R.disc.addEventListener('input', function () { onRowChange(row); });
@@ -710,6 +890,9 @@ function cfDefByLabel(label) {
       e.addEventListener('blur', function () { validateRow(row); });
     });
     R.del.addEventListener('click', function () { removeRow(row); });
+    R.itemX.addEventListener('click', function () { clearItem(row); });
+    R.itemMenu.addEventListener('click', function () { openRowMenu(row, R.itemMenu); });
+    R.hsnBtn.addEventListener('click', function () { openHsnModal(row); });
     return row;
   }
   function renumber() {
@@ -727,14 +910,15 @@ function cfDefByLabel(label) {
 
   function clearRowErr(row) { row.refs.err.textContent = ''; }
 
-  function selectItem(row, it) {
+  function selectItem(row, it, qty) {
     var R = row.refs;
     R.item.disabled = true;
     R.err.textContent = 'Loading item…';
-    api('GET', '/items/' + it.item_id).then(function (j) {
+    return api('GET', '/items/' + it.item_id).then(function (j) {
       var item = j.item || it;
       if (item.status && item.status !== 'active') throw mkErr('data', 'This item is inactive.');
       row.item = item;
+      showMeta(row);
       R.item.value = item.name;
       if (!R.desc.value.trim()) R.desc.value = item.description || '';
 
@@ -754,9 +938,11 @@ function cfDefByLabel(label) {
       } else {
         R.err.textContent = '';
       }
-      R.tax.value = taxId;
+      R.tax.value = taxId || (detectGst() ? 'ex:nontaxable' : '');
+            if (qty) R.qty.value = String(qty);
       row.rateTouched = false;
       refreshRate(row, true);
+
       onRowChange(row);
     }).catch(function (e) {
       row.item = null;
@@ -768,7 +954,7 @@ function cfDefByLabel(label) {
   function refreshRate(row, force) {
     if (!row.item || (row.rateTouched && !force)) return;
     var qty = toNum(row.refs.qty.value);
-    var r = priceListRate(row.item, isFinite(qty) && qty > 0 ? qty : 1, S.pricebook, precision());
+    var r = priceListRate(row.item, isFinite(qty) && qty > 0 ? qty : 1, row.pb, precision());
     if (isFinite(r)) row.refs.rate.value = String(r);
   }
 
@@ -788,7 +974,9 @@ function cfDefByLabel(label) {
     ['item', 'qty', 'rate', 'disc', 'tax'].forEach(function (k) { R[k].classList.remove('invalid'); });
 
     if (!row.item) bad(R.item, 'select an item from the list');
-
+    else if (detectGst() && !String(row.item.hsn_or_sac || '').trim()) {
+      bad(R.item, (row.item.product_type === 'service' ? 'SAC' : 'HSN') + ' code is missing – click "Update" under the item and add it');
+    }
     var q = toNum(R.qty.value);
     if (!isFinite(q) || q <= 0) bad(R.qty, 'quantity must be greater than 0');
     else if (decimals(R.qty.value.trim()) > CONFIG.maxQtyDecimals) bad(R.qty, 'quantity allows at most ' + CONFIG.maxQtyDecimals + ' decimals');
@@ -797,10 +985,9 @@ function cfDefByLabel(label) {
     if (!isFinite(r) || r < 0) bad(R.rate, 'enter a valid rate (0 or more)');
     else if (decimals(R.rate.value.trim()) > precision()) bad(R.rate, 'rate allows at most ' + precision() + ' decimals');
 
-    if (S.currency && R.tax.value && !S.taxMap[R.tax.value]) bad(R.tax, 'tax is not available');
-
+    if (S.currency && R.tax.value && R.tax.value.indexOf('ex:') !== 0 && !S.taxMap[R.tax.value]) bad(R.tax, 'tax is not available');
     if (isFinite(q) && q > 0 && isFinite(r) && r >= 0 && $('discLevel').value === 'item_level') {
-      var d = parseDiscount(R.disc.value, q * r);
+      var d = parseDiscount(discText(row), q * r);
       if (!d.ok) bad(R.disc, d.msg);
     }
 
@@ -813,12 +1000,710 @@ function cfDefByLabel(label) {
     return msgs;
   }
 
+
+
+  /* ---- shared helpers for warehouse / price list / discount ---- */
+function askConfirm(msg) {
+  return new Promise(function (resolve) {
+    $('cfmMsg').textContent = msg;
+    $('cfmModal').hidden = false;
+    function done(v) {
+      $('cfmModal').hidden = true;
+      $('cfmYes').onclick = $('cfmNo').onclick = null;
+      resolve(v);
+    }
+    $('cfmYes').onclick = function () { done(true); };
+    $('cfmNo').onclick = function () { done(false); };
+  });
+}
+function curSym() { return (S.currency && S.currency.currency_symbol) || '₹'; }
+function discText(row) {            // text fed to parseDiscount: "10%" or "10"
+  var v = row.refs.disc.value.trim();
+  if (v === '' || /%$/.test(v)) return v;
+  return row.refs.discMode.value === 'pct' ? v + '%' : v;
+}
+function pbOpt(p) {
+  var t = p.pricebook_type === 'fixed_percentage' && p.percentage != null
+    ? ' [' + p.percentage + '% ' + (p.is_increase ? 'Markup' : 'Markdown') + ']' : '';
+  return { pricebook_id: p.pricebook_id, name: p.name + t };
+}
+function setRowLoc(row, v) { row.loc = v; if (row.refs.loc) row.refs.loc.value = v; }
+function setRowPb(row, pb) {
+  row.pb = pb || null;
+  if (row.refs.pl) row.refs.pl.value = pb ? String(pb.pricebook_id) : '';
+}
+  /* ================= ROW EXTRAS: meta, menu, HSN, tags ================= */
+function showMeta(row) {
+  var R = row.refs, it = row.item, on = !!it;
+  R.itemX.hidden = R.itemMenu.hidden = R.meta.hidden = !on;
+  if (!on) return;
+  var svc = it.product_type === 'service';
+  R.badge.textContent = svc ? 'SERVICE' : 'GOODS';
+  R.hsnWrap.hidden = !detectGst();
+  var miss = detectGst() && !String(it.hsn_or_sac || '').trim();
+  R.hsnWrap.classList.toggle('hsn-missing', miss);
+  R.hsnTxt.textContent = (svc ? 'SAC Code: ' : 'HSN Code: ') + (miss ? 'Not added (required)' : it.hsn_or_sac);
+}
+
+function clearItem(row) {
+  var R = row.refs;
+  row.item = null; row.rateTouched = false;
+  R.item.value = ''; R.desc.value = ''; R.rate.value = ''; R.tax.value = '';
+  R.brand.textContent = ''; R.brand.parentNode.dataset.empty = '1';
+  showMeta(row); clearRowErr(row); recalc();
+  R.item.focus();               // focus re-opens the item dropdown
+}
+
+var MENU = null;
+function closeRowMenu() { if (MENU) { MENU.remove(); MENU = null; } }
+function openRowMenu(row, btn) {
+  closeRowMenu();
+  var m = mk('div', { class: 'row-menu' }, document.body), r = btn.getBoundingClientRect();
+  m.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 200)) + 'px';
+  m.style.top = (r.bottom + 4) + 'px';
+  [['✎  Edit Item', 'edit'], ['🧺  View Item Details', 'view']].forEach(function (x) {
+    var b = mk('button', { type: 'button', text: x[0] }, m);
+    b.addEventListener('mousedown', function (ev) { ev.preventDefault(); closeRowMenu(); openItemModal(row, x[1]); });
+  });
+  MENU = m;
+}
+document.addEventListener('mousedown', function (ev) { if (MENU && !MENU.contains(ev.target)) closeRowMenu(); });
+
+/* ---- HSN / SAC update ---- */
+/* ---- HSN / SAC search ---- */
+var HS = { row: null, saving: false, wired: false, t: null, items: [], active: -1, token: 0 };
+
+// codes already used on loaded items (fallback / extra suggestions)
+function hsnLocal(q) {
+  var seen = {}, out = [], svc = HS.row && HS.row.item && HS.row.item.product_type === 'service';
+  var pool = [].concat(BK.all || [], S.rows.map(function (r) { return r.item; }).filter(Boolean));
+  pool.forEach(function (it) {
+    var c = String(it.hsn_or_sac || '').trim();
+    if (!c || seen[c]) return;
+    if ((it.product_type === 'service') !== !!svc) return;
+    if (c.indexOf(q) > -1 || String(it.name || '').toLowerCase().indexOf(q.toLowerCase()) > -1) {
+      seen[c] = 1;
+      out.push({ code: c, desc: 'Used on item: ' + it.name });
+    }
+  });
+  return out;
+}
+
+function hsnSearch(q) {
+  var svc = HS.row && HS.row.item && HS.row.item.product_type === 'service';
+  return api('GET', '/meta/hsncodes', { search_text: q, country: 'India', is_service_item: svc ? 'true' : 'false' })
+    .then(function (j) {
+      var arr = null;
+      Object.keys(j).forEach(function (k) { if (!arr && Array.isArray(j[k])) arr = j[k]; });
+      return (arr || []).map(function (x) {
+        return { code: String(x.hsn_or_sac || x.hsn_code || x.code || x.value || ''), desc: x.description || x.name || x.label || '' };
+      }).filter(function (x) { return x.code; });
+    }, function (e) {
+      if (CONFIG.debug) console.warn('[SOWidget] HSN API search failed, using local codes only', e);
+      return [];
+    })
+    .then(function (list) {
+      var have = {};
+      list.forEach(function (x) { have[x.code] = 1; });
+      hsnLocal(q).forEach(function (x) { if (!have[x.code]) list.push(x); });
+      return list.slice(0, 50);
+    });
+}
+
+function hsnDdHide() { $('hsnDd').hidden = true; HS.active = -1; }
+
+function hsnDdPaint(msg) {
+  var dd = $('hsnDd');
+  dd.innerHTML = '';
+  dd.hidden = false;
+  if (msg) { mk('div', { class: 'hsn-msg', text: msg }, dd); return; }
+  HS.items.forEach(function (x, i) {
+    var d = mk('div', { class: 'hsn-opt' + (i === HS.active ? ' active' : '') }, dd);
+    d.setAttribute('role', 'option');
+    mk('b', { text: x.code }, d);
+    if (x.desc) mk('span', { text: x.desc }, d);
+    d.addEventListener('mousedown', function (ev) { ev.preventDefault(); hsnPick(i); });
+    d.addEventListener('mouseenter', function () { HS.active = i; hsnDdActive(); });
+  });
+}
+
+function hsnDdActive() {
+  Array.prototype.forEach.call($('hsnDd').querySelectorAll('.hsn-opt'), function (n, i) {
+    n.classList.toggle('active', i === HS.active);
+    if (i === HS.active && n.scrollIntoView) n.scrollIntoView({ block: 'nearest' });
+  });
+}
+
+function hsnPick(i) {
+  var x = HS.items[i];
+  if (!x) return;
+  $('hsnInput').value = x.code;
+  mark($('hsnInput'), '');
+  $('hsnStatus').textContent = '';
+  hsnDdHide();
+  $('hsnInput').focus();
+}
+
+function hsnWire() {
+  if (HS.wired) return;
+  HS.wired = true;
+  var inp = $('hsnInput');
+
+  inp.addEventListener('input', function () {
+    clearTimeout(HS.t);
+    var q = inp.value.trim(), my = ++HS.token;
+    mark(inp, '');
+    if (q.length < 3) { HS.items = []; hsnDdHide(); $('hsnStatus').textContent = 'Type at least 3 characters to search'; return; }
+    $('hsnStatus').textContent = '';
+    hsnDdPaint('Searching…');
+    HS.t = setTimeout(function () {
+      hsnSearch(q).then(function (list) {
+        if (my !== HS.token) return;                 // stale result
+        HS.items = list;
+        HS.active = list.length ? 0 : -1;
+        if (list.length) hsnDdPaint(); else hsnDdPaint('No matching HSN/SAC codes found');
+      });
+    }, 300);
+  });
+
+  inp.addEventListener('keydown', function (ev) {
+    var open = !$('hsnDd').hidden && HS.items.length;
+    if (ev.key === 'ArrowDown' && open) { ev.preventDefault(); HS.active = Math.min(HS.items.length - 1, HS.active + 1); hsnDdActive(); }
+    else if (ev.key === 'ArrowUp' && open) { ev.preventDefault(); HS.active = Math.max(0, HS.active - 1); hsnDdActive(); }
+    else if (ev.key === 'Enter' && open && HS.active >= 0) { ev.preventDefault(); hsnPick(HS.active); }
+    else if (ev.key === 'Escape' && !$('hsnDd').hidden) { ev.preventDefault(); ev.stopPropagation(); hsnDdHide(); }
+  });
+
+  inp.addEventListener('blur', function () { setTimeout(hsnDdHide, 150); });
+}
+
+function openHsnModal(row) {
+  if (!row.item) return;
+  HS.row = row;
+  hsnWire();
+  HS.items = [];
+  HS.token++;
+  $('hsnLbl').textContent = row.item.product_type === 'service' ? 'SAC Code' : 'HSN Code';
+  $('hsnInput').value = row.item.hsn_or_sac || '';
+  hsnDdHide();
+  $('hsnStatus').textContent = 'Type at least 3 characters to search';
+  mark($('hsnInput'), '');
+  $('hsnModal').hidden = false;
+  $('hsnInput').focus();
+}
+function hsnSave() {
+  if (HS.saving) return;
+  var row = HS.row, it = row.item, v = $('hsnInput').value.trim(), svc = it.product_type === 'service';
+  if (!v) { mark($('hsnInput'), (svc ? 'SAC' : 'HSN') + ' code is required'); return; }
+  if (!(svc ? /^\d{6}$/.test(v) : /^(\d{4}|\d{6}|\d{8})$/.test(v))) {
+    mark($('hsnInput'), svc ? 'SAC must be 6 digits' : 'HSN must be 4, 6 or 8 digits'); return;
+  }
+  mark($('hsnInput'), '');
+  HS.saving = true; $('hsnSave').disabled = true; $('hsnStatus').textContent = 'Saving…';
+
+  api('PUT', '/items/' + it.item_id, {}, { name: it.name, rate: Number(it.rate), hsn_or_sac: v }).then(function (res) {
+    var saved = String((res && res.item && res.item.hsn_or_sac) || v);
+    // update every row that uses the same item, not just this one
+    S.rows.forEach(function (r) {
+      if (r.item && String(r.item.item_id) === String(it.item_id)) {
+        r.item.hsn_or_sac = saved;
+        showMeta(r);
+        r.refs.item.classList.remove('invalid');
+        if (/code is missing/.test(r.refs.err.textContent)) r.refs.err.textContent = '';
+      }
+    });
+    $('hsnModal').hidden = true;
+  }).catch(function (e) {
+    $('hsnStatus').textContent = 'Update failed: ' + errText(e);
+  }).then(function () { HS.saving = false; $('hsnSave').disabled = false; });
+}
+
+/* ---- Per-row Reporting Tags popup ---- */
+var TG = { row: null };
+function updateTagCount(row) {
+  var n = Object.keys(row.tags).filter(function (k) { return row.tags[k]; }).length;
+  if (row.refs.tagBtn) row.refs.tagBtn.querySelector('.tg-n').textContent = n ? '(' + n + ')' : '';
+}
+function openTagModal(row) {
+  TG.row = row;
+  var grid = $('tagGrid'); grid.innerHTML = '';
+  if (!S.tags.length) mk('div', { class: 'hint', text: 'No reporting tags with options were found.' }, grid);
+  S.tags.forEach(function (t) {
+    var f = mk('div', { class: 'tg-f' }, grid);
+    mk('label', { text: t.tag_name + (t.is_mandatory ? ' *' : '') }, f);
+    var sel = mk('select', { id: 'rt_' + t.tag_id }, f);
+    fillOptions(sel, t.options.map(function (o) {
+      return [o.tag_option_id, o.tag_option_name || o.option_name || o.tag_option_id];
+    }), '— none —');
+    sel.value = row.tags[t.tag_id] || '';
+    lookupEnhance(sel);
+  });
+  $('tagStatus').textContent = ''; $('tagModal').hidden = false;
+}
+function tagSave() {
+  var row = TG.row, missing = '';
+  S.tags.forEach(function (t) {
+    var el = $('rt_' + t.tag_id);
+    if (el && t.is_mandatory && !el.value && !missing) missing = t.tag_name;
+  });
+  if (missing) { $('tagStatus').textContent = missing + ' is required'; return; }
+  S.tags.forEach(function (t) { var el = $('rt_' + t.tag_id); if (el) row.tags[t.tag_id] = el.value; });
+  updateTagCount(row);
+  $('tagModal').hidden = true;
+}
+
+/* ================= TDS / TCS ================= */
+var TX = { saving: false, wired: false, sections: {} };
+function txMode() { return document.querySelector('input[name="tds_tcs"]:checked').value; }
+function txList(m) {
+  return (m || txMode()) === 'tds' ? S.tdsTaxes : S.tcsTaxes;
+}
+function txFill(selectedId) {
+  var sel = $('tdsTax');
+  if (!sel) return;
+  var list = txList();
+  if (!list.length) {
+    sel.innerHTML = '';
+    sel.value = '';
+    txLabels();
+    return;
+  }
+  fillOptions(sel, list.map(function (t) {
+    return [t.tax_id, t.tax_name + ' [' + t.tax_percentage + '%]'];
+  }), 'Select a Tax');
+  sel.value = selectedId ? String(selectedId) : '';
+  txLabels();
+}
+
+function txLabels() {
+  var sel = $('tdsTax'), lk = sel && sel._lk;
+  if (!lk) return;
+  var U = txMode().toUpperCase(), panel = lk.panel;
+  var btnSpan = panel.querySelector('.lk-foot .combo-new-btn span:last-child');
+  if (btnSpan) btnSpan.textContent = 'New ' + U + ' Tax';
+
+  var group = panel.querySelector('.lk-group');
+  if (!group) {
+    group = mk('div', { class: 'lk-group' });
+    panel.insertBefore(group, panel.querySelector('.lk-list'));
+  }
+  group.textContent = U;
+
+  var note = panel.querySelector('.lk-note');
+  if (!note) note = mk('div', { class: 'lk-note' }, panel);
+  note.innerHTML = '<b>Note:</b> To view or manage ' + U +
+    ', go to <b>Settings &gt; Direct Taxes &gt; ' + U + ' Rates.</b>';
+  panel.appendChild(note);
+}
+
+function txHint(show) {
+  var hint = $('txApiHint');
+  if (!hint) {
+    var row = $('tdsTax') && $('tdsTax').closest('.t-row');
+    if (!row || !row.parentNode) return;
+    hint = mk('div', {
+      id: 'txApiHint',
+      class: 'hint tx-api-hint',
+      text: 'TDS/TCS changes the total shown here, but this widget does not save it on the sales order because the documented API has no applicable order-level field.'
+    });
+    row.parentNode.insertBefore(hint, row.nextSibling);
+  }
+  hint.hidden = !show;
+}
+
+function withholding(t) {
+  var m = txMode(), id = $('tdsTax').value;
+  var tax = txList(m).filter(function (x) { return String(x.tax_id) === id; })[0] || null;
+  txHint(!!tax);
+  if (!tax) return { type: m, tax: null, amount: 0, signed: 0 };
+  var pct = Number(tax.tax_percentage);
+  if (!isFinite(pct)) pct = 0;
+  var base = m === 'tds' ? t.subTotal : t.subTotal + t.taxTotal;
+  var amt = round(base * pct / 100, precision());
+  return { type: m, tax: tax, amount: amt, signed: m === 'tds' ? -amt : amt };
+}
+
+// function txSections(mode) {
+//   mode = mode === 'tcs' ? 'tcs' : 'tds';
+//   if (TX.sections[mode]) return Promise.resolve(TX.sections[mode]);
+//   return api('GET', CONFIG.uiApiRoot + '/autocomplete/taxspecifictype', { search_text: '', tax_type: mode, version: 2 })
+//     .then(function (j) {
+//       TX.sections[mode] = (j.results || []).filter(function (x) { return x.value; }).map(function (x) {
+//         return { value: x.value, label: x.section_no || x.value, desc: x.description || '', old: x.old_section_no || '' };
+//       });
+//       return TX.sections[mode];
+      
+//     });
+// }
+
+// function txFillSections(list, blank) {
+//   var sel = $('tx_section');
+//   if (!sel) return;
+//   if (blank === undefined || blank === null) {
+//     blank = txMode() === 'tcs' ? 'Select a Nature of Collection' : 'Select a Section';
+//   }
+//   sel.innerHTML = '';
+//   mk('option', { value: '', text: blank }, sel);
+//   (list || []).forEach(function (x) {
+//     var o = mk('option', { value: x.value, text: x.label }, sel);
+//     o.dataset.desc = x.desc;
+//     o.dataset.old = x.old;
+//   });
+//   sel.value = '';
+// }
+
+// function fyStart() {
+//   var d = new Date(), y = d.getMonth() < 3 ? d.getFullYear() - 1 : d.getFullYear();
+//   return y + '-04-01';
+// }
+
+/* ================= REPLACED openTaxModal =================
+   The public API cannot create TDS/TCS taxes.
+   Show an instruction modal instead of a form.
+   ======================================================== */
+// function openTaxModal() {
+//   var U = txMode().toUpperCase();
+
+//   // Build a simple message modal (reuse the existing #txModal shell)
+//   var modal = $('txModal');
+//   var body  = modal.querySelector('.modal-body');
+//   var foot  = modal.querySelector('.modal-foot');
+//   var title = $('txTitle');
+
+//   title.textContent = 'Create ' + U + ' in Zoho Books';
+//   body.innerHTML =
+//     '<p style="margin:0 0 12px">Zoho Books does not allow creating ' + U +
+//     ' rates through the public API.</p>' +
+//     '<p style="margin:0 0 12px">Please create the rate manually:</p>' +
+//     '<ol style="margin:0 0 12px 18px;padding:0">' +
+//       '<li>Go to <b>Settings → Direct Taxes → ' + U + ' Rates</b>.</li>' +
+//       '<li>Click <b>+ New ' + U + ' Rate</b>.</li>' +
+//       '<li>Enter the name, rate, and section/nature of collection.</li>' +
+//       '<li>Save, then return here and click <b>Refresh</b>.</li>' +
+//     '</ol>' +
+//     '<p class="hint">The newly created rate will appear in the dropdown after refreshing.</p>';
+
+//   foot.innerHTML =
+//     '<button type="button" class="btn primary" id="txRefreshBtn">Refresh list</button>' +
+//     '<button type="button" class="btn" id="txCancelBtn">Close</button>';
+
+//   // wire buttons
+//   $('txRefreshBtn').addEventListener('click', function () {
+//     $('txRefreshBtn').disabled = true;
+//     $('txCancelBtn').disabled = true;
+//     var keep = $('tdsTax').value;
+//     loadTaxes(true).then(function () {
+//       txFill(keep);
+//       recalc();
+//       if (txList().length) modal.hidden = true;
+//       else body.appendChild(mk('div', {
+//         class: 'hint',
+//         text: 'No ' + U + ' rates were returned by the API. Check the console for the raw tax response and verify the rate-list endpoint.'
+//       }));
+//     }).catch(function (e) {
+//       // keep the modal open and show an error
+//       var err = mk('div', { class: 'banner', text: 'Could not refresh: ' + errText(e) });
+//       body.appendChild(err);
+//     }).then(function () {
+//       $('txRefreshBtn').disabled = false;
+//       $('txCancelBtn').disabled = false;
+//     });
+//   });
+//   $('txCancelBtn').addEventListener('click', function () { modal.hidden = true; });
+
+//   modal.hidden = false;
+// }
+// function txClose() { if (!TX.saving) $('txModal').hidden = true; }
+
+// function txValidate() { return false; }
+// function txPayload() { return null; }
+// function txSave() { openTaxModal(); }
+
+/* ================= NEW TDS / TCS TAX (POST /settings/taxes) ================= */
+var TXM = { wired: false, saving: false, accounts: null, sec: {} };
+
+function fyStart() {
+  var d = new Date(), y = d.getMonth() < 3 ? d.getFullYear() - 1 : d.getFullYear();
+  return y + '-04-01';
+}
+
+function txLoadAccounts() {
+  if (TXM.accounts) return Promise.resolve(TXM.accounts);
+  return api('GET', '/chartofaccounts', { filter_by: 'AccountType.Active', per_page: 200 }).then(function (j) {
+    TXM.accounts = firstArray(j, 'chartofaccounts');
+    return TXM.accounts;
+  }).catch(function () { TXM.accounts = []; return TXM.accounts; });
+}
+
+// Sections depend on the Income Tax Act version (2 = New Income Tax Act 2025, 1 = old Act)
+function txSectionList(mode, ver) {
+  var key = mode + '_' + ver;
+  if (TXM.sec[key]) return Promise.resolve(TXM.sec[key]);
+  return api('GET', CONFIG.uiApiRoot + '/autocomplete/taxspecifictype', { search_text: '', tax_type: mode, version: ver })
+    .then(function (j) {
+      TXM.sec[key] = (j.results || []).filter(function (x) { return x.value; }).map(function (x) {
+        return { value: x.value, label: x.section_no || x.value, desc: x.description || '', old: x.old_section_no || '' };
+      });
+      return TXM.sec[key];
+    });
+}
+
+function txFillSections(list) {
+  var sel = $('tx_section');
+  if (!sel) return;
+  var U = txMode();
+  sel.innerHTML = '';
+  mk('option', { value: '', text: U === 'tcs' ? 'Select a Nature of Collection' : 'Select a Section' }, sel);
+  (list || []).forEach(function (x) {
+    var o = mk('option', { value: x.value, text: x.label }, sel);
+    o.dataset.desc = x.desc;
+    o.dataset.old = x.old;
+  });
+  sel.value = '';
+}
+
+function txRow(label, id, el, req, hidden) {
+  var row = mk('div', { class: 'nc-row' });
+  if (hidden) row.hidden = true;
+  mk('label', { class: 'nc-l' + (req ? ' req' : ''), htmlFor: id, text: label + (req ? '*' : '') }, row);
+  var c = mk('div', { class: 'nc-c' }, row);
+  c.appendChild(el);
+  return row;
+}
+
+function txClose() { if (!TXM.saving) $('txModal').hidden = true; }
+
+function openTaxModal() {
+  var mode = txMode(), U = mode.toUpperCase(), modal = $('txModal');
+  var body = $('txModalBody'), foot = modal.querySelector('.modal-foot');
+
+  if (!TXM.wired) {
+    TXM.wired = true;
+    $('txClose').addEventListener('click', txClose);
+    modal.addEventListener('mousedown', function (ev) { if (ev.target === modal) txClose(); });
+  }
+
+  $('txTitle').textContent = 'New ' + U;
+  body.innerHTML = '';
+  foot.innerHTML = '';
+
+  /* ---- fields ---- */
+  var fName = mk('input', { type: 'text', id: 'tx_name', class: 'w-main', maxLength: 100, autocomplete: 'off' });
+  var fRate = mk('input', { type: 'text', id: 'tx_rate', class: 'w-main', inputMode: 'decimal', autocomplete: 'off' });
+
+  var fAct = mk('select', { id: 'tx_act', class: 'w-main' });
+  mk('option', { value: '2', text: 'New Income Tax Act 2025' }, fAct);
+  mk('option', { value: '1', text: 'Income Tax Act 1961' }, fAct);
+
+  var fSec = mk('select', { id: 'tx_section', class: 'w-main' });
+  var fPay = mk('select', { id: 'tx_payable', class: 'w-main' });
+  var fRec = mk('select', { id: 'tx_receivable', class: 'w-main' });
+
+  var fHigh = mk('input', { type: 'checkbox', id: 'tx_high' });
+  var highWrap = mk('label', { class: 'radio' });
+  highWrap.appendChild(fHigh);
+  mk('span', { text: ' This is a Higher ' + U + ' Rate' }, highWrap);
+
+  var fWhy = mk('select', { id: 'tx_why', class: 'w-main' });
+  mk('option', { value: '', text: 'Select a reason' }, fWhy);
+  // "tds_non_pan" is confirmed from your API response; the second value is a guess - edit it if Zoho rejects it
+  mk('option', { value: 'tds_non_pan', text: 'Non-furnishing of PAN' }, fWhy);
+  mk('option', { value: 'tds_non_filer', text: 'Non-filing of income tax return' }, fWhy);
+
+  var fStart = mk('input', { type: 'date', id: 'tx_start', class: 'w-main', value: fyStart() });
+  var fEnd = mk('input', { type: 'date', id: 'tx_end', class: 'w-main' });
+
+  body.appendChild(txRow('Tax Name', 'tx_name', fName, true));
+  body.appendChild(txRow('Rate (%)', 'tx_rate', fRate, true));
+  body.appendChild(txRow('Applicable Income Tax Act', 'tx_act', fAct, false));
+  body.appendChild(txRow(mode === 'tcs' ? 'Nature of Collection' : 'Section', 'tx_section', fSec, true));
+  if (mode === 'tds') {
+    body.appendChild(txRow('TDS Payable Account', 'tx_payable', fPay, false));
+    body.appendChild(txRow('TDS Receivable Account', 'tx_receivable', fRec, false));
+  } else {
+    body.appendChild(txRow('TCS Payable Account', 'tx_payable', fPay, true));   // one account, must be Other Current Liability
+  }
+  var highRow = txRow('', 'tx_high', highWrap, false);
+  highRow.hidden = mode !== 'tds';
+  body.appendChild(highRow);
+  var whyRow = txRow('Reason for Higher ' + U + ' Rate', 'tx_why', fWhy, true, true);
+  body.appendChild(whyRow);
+  mk('h4', { text: 'Applicable Period', style: 'margin:14px 0 6px' }, body);
+  body.appendChild(txRow('Start Date', 'tx_start', fStart, false));
+  body.appendChild(txRow('End Date', 'tx_end', fEnd, false));
+
+  fHigh.addEventListener('change', function () { whyRow.hidden = !fHigh.checked; });
+
+  /* ---- footer ---- */
+  var save = mk('button', { type: 'button', class: 'btn primary', id: 'txSaveBtn', text: 'Save' }, foot);
+  var cancel = mk('button', { type: 'button', class: 'btn', id: 'txCancelBtn', text: 'Cancel' }, foot);
+  var status = mk('span', { class: 'status', id: 'txStatus' }, foot);
+  cancel.addEventListener('click', txClose);
+  save.addEventListener('click', txSave);
+
+  /* ---- data ---- */
+  save.disabled = true;
+  status.textContent = 'Loading…';
+  TXM.saving = false;
+  (mode === 'tds' ? [fAct, fSec, fPay, fRec, fWhy] : [fAct, fSec, fPay, fWhy]).forEach(function (s) { lookupEnhance(s); });  modal.hidden = false;
+
+  function loadSections() {
+    status.textContent = 'Loading sections…';
+    return txSectionList(mode, fAct.value).then(function (list) {
+      txFillSections(list);
+      status.textContent = '';
+    }).catch(function (e) {
+      txFillSections([]);
+      status.textContent = 'Could not load sections: ' + errText(e);
+    });
+  }
+  fAct.addEventListener('change', loadSections);
+
+  Promise.all([txLoadAccounts(), loadSections()]).then(function (res) {
+    var all = res[0];
+    var acc = all.map(function (a) { return [a.account_id, a.account_name]; });
+    if (mode === 'tds') {
+      fillOptions(fPay, acc, 'Select an account');
+      fillOptions(fRec, acc, 'Select an account');
+      var adv = all.filter(function (a) { return /^advance tax$/i.test(a.account_name); })[0];
+      if (adv) fRec.value = String(adv.account_id);
+    } else {
+      var liab = all.filter(function (a) { return a.account_type === 'other_current_liability'; })
+        .map(function (a) { return [a.account_id, a.account_name]; });
+      fillOptions(fPay, liab.length ? liab : acc, 'Select an account');
+    }
+    save.disabled = false;
+    fName.focus();
+  });
+}
+
+function txValidate() {
+  var errs = [], mode = txMode();
+  function bad(id, msg) { mark($(id), msg); errs.push({ el: $(id), msg: msg }); }
+  ['tx_name', 'tx_rate', 'tx_section', 'tx_why', 'tx_start', 'tx_end'].forEach(function (id) { mark($(id), ''); });
+
+  var name = nv('tx_name');
+  if (!name) bad('tx_name', 'Tax name is required');
+  else if (name.length > 100) bad('tx_name', 'Tax name is too long');
+
+  var r = nv('tx_rate'), n = toNum(r);
+  if (!r) bad('tx_rate', 'Rate is required');
+  else if (!isFinite(n) || n < 0 || n > 100) bad('tx_rate', 'Enter a rate between 0 and 100');
+  else if (decimals(r) > 4) bad('tx_rate', 'Maximum 4 decimal places');
+
+  if (!$('tx_section').value) bad('tx_section', 'Select a ' + (mode === 'tcs' ? 'nature of collection' : 'section'));
+  if (mode === 'tcs' && !$('tx_payable').value) bad('tx_payable', 'Select the TCS account (Other Current Liability)');
+  if (mode === 'tds' && $('tx_high').checked && !$('tx_why').value) bad('tx_why', 'Select a reason for the higher rate');
+
+  var s = $('tx_start').value, e = $('tx_end').value;
+  if (s && !validISODate(s)) bad('tx_start', 'Enter a valid date');
+  if (e && !validISODate(e)) bad('tx_end', 'Enter a valid date');
+  else if (s && e && e < s) bad('tx_end', 'End date cannot be before the start date');
+
+  var dup = txList(mode).some(function (t) { return String(t.tax_name || '').toLowerCase() === name.toLowerCase(); });
+  if (name && dup) bad('tx_name', 'A ' + mode.toUpperCase() + ' tax with this name already exists');
+  return errs;
+}
+
+// function txPayload() {
+//   var mode = txMode(), p = {
+//     tax_name: nv('tx_name'),
+//     tax_percentage: toNum(nv('tx_rate')),
+//     tax_type: mode + '_tax',                       // 'tds_tax' / 'tcs_tax'
+//     tax_specific_type: $('tx_section').value,
+//     tax_specific_type_version: parseInt($('tx_act').value, 10)
+//   };
+//   if (mode === 'tds') {
+//     if ($('tx_receivable').value) p.tax_account_id = $('tx_receivable').value;
+//     if ($('tx_payable').value) p.tds_payable_account_id = $('tx_payable').value;
+//   } else if ($('tx_payable').value) {
+//     p.tax_account_id = $('tx_payable').value;   // TCS: the Other Current Liability account
+//   }  if (mode === 'tds' && $('tx_high').checked) p.diff_rate_reason = $('tx_why').value;
+//   if ($('tx_start').value) p.start_date = $('tx_start').value;
+//   if ($('tx_end').value) p.end_date = $('tx_end').value;
+//   return p;
+// }
+
+function txPayload() {
+  var mode = txMode();
+  var p = {
+    tax_name: nv('tx_name'),
+    tax_percentage: String(nv('tx_rate')),
+    tax_type: mode + '_tax',                        // 'tds_tax' / 'tcs_tax'
+    tax_specific_type: $('tx_section').value,
+    tax_account_id: '',
+    diff_rate_reason: '',
+    start_date: $('tx_start').value || '',
+    end_date: $('tx_end').value || ''
+  };
+
+  if (mode === 'tds') {
+    if ($('tx_receivable').value) p.tax_account_id = $('tx_receivable').value;
+    if ($('tx_payable').value) p.tds_payable_account_id = $('tx_payable').value;
+    if ($('tx_high').checked) p.diff_rate_reason = $('tx_why').value;
+  } else {
+    p.tax_account_id = $('tx_payable').value;       // TCS: the Other Current Liability account
+  }
+
+  // Your working payload had no version, which Zoho treats as the new 2025 Act.
+  // Only send it when the old Act is selected.
+  if ($('tx_act').value === '1') p.tax_specific_type_version = 1;
+
+  return p;
+}
+function txDone(t, mode) {
+  TXM.saving = false;
+  var list = mode === 'tds' ? S.tdsTaxes : S.tcsTaxes;
+  if (!list.some(function (x) { return String(x.tax_id) === String(t.tax_id); })) list.push(t);
+  $('txModal').hidden = true;
+  if (txMode() === mode) txFill(t.tax_id);
+  recalc();
+}
+
+function txSave() {
+  if (TXM.saving) return;
+  var errs = txValidate(), mode = txMode();
+  if (errs.length) {
+    $('txStatus').textContent = errs[0].msg;
+    if (errs[0].el && errs[0].el.focus) errs[0].el.focus();
+    return;
+  }
+  TXM.saving = true;                                // synchronous lock against double clicks
+  $('txSaveBtn').disabled = true;
+  $('txStatus').textContent = 'Saving…';
+  var p = txPayload();
+  if (CONFIG.debug) console.log('%c[Create ' + mode.toUpperCase() + ' payload]', 'color:#7a3db8', p);
+
+  api('POST', '/settings/taxes', {}, p).then(function (res) {
+    var t = res && res.tax;
+    if (!t || !t.tax_id) throw mkErr('unconfirmed', 'Zoho Books did not return the created tax.', true);
+    txDone(t, mode);
+  }).catch(function (e) {
+    if (CONFIG.debug) console.warn('[SOWidget] create tax failed', e, e && e.json);
+    function fail(msg) {
+      TXM.saving = false;
+      $('txSaveBtn').disabled = false;
+      $('txStatus').textContent = msg;
+    }
+    if (e && e.uncertain) {                         // no confirmation: re-read the list before allowing a retry
+      $('txStatus').textContent = 'No confirmation received – checking Zoho Books…';
+      return loadTaxes(true).then(function () {
+        var hit = txList(mode).filter(function (t) {
+          return String(t.tax_name || '').toLowerCase() === p.tax_name.toLowerCase();
+        })[0];
+        if (hit) txDone(hit, mode);
+        else fail('Zoho Books did not confirm the tax was created. Check Direct Taxes in Settings before saving again.');
+      }, function () { fail('Could not confirm whether the tax was created. Check Settings before saving again.'); });
+    }
+    fail('Save failed: ' + errText(e));
+  });
+}
   /* ================= TOTALS ================= */
   function currentLines() {
     return S.rows.map(function (row) {
       var R = row.refs, t = S.taxMap[R.tax.value];
       return {
-        qty: toNum(R.qty.value), rate: toNum(R.rate.value), discount: R.disc.value,
+        qty: toNum(R.qty.value), rate: toNum(R.rate.value), discount: discText(row),
         taxId: R.tax.value, taxPct: t ? Number(t.tax_percentage) : 0, row: row
       };
     }).filter(function (l) { return !isPristine(l.row); });
@@ -831,6 +1716,28 @@ function cfDefByLabel(label) {
       beforeTax: $('beforeTax').checked, inclusive: $('inclusive').checked,
       shipping: isFinite(ship) ? ship : 0, adjustment: isFinite(adj) ? adj : 0
     });
+  }
+  // inter-state when the Place of Supply state differs from the selected location's state
+  function taxIsInter() {
+    var pos = $('placeOfSupply') && $('placeOfSupply').value;
+    var loc = S.locations.filter(function (l) { return String(l.location_id) === String($('location').value); })[0];
+    var sc = loc && loc.address && loc.address.state_code;
+    return !!(pos && sc && pos !== sc);
+  }
+
+  function fmtPct(n) { return String(round(n, 4)); }
+
+  // GST5 -> CGST2.5 + SGST2.5 (intra) or IGST5 (inter). Non-group taxes stay as they are.
+  function taxComponents(tax, inter) {
+    var pct = Number(tax.tax_percentage) || 0;
+    if (Array.isArray(tax.taxes) && tax.taxes.length) {          // API already returned the group's members
+      return tax.taxes.map(function (c) { return { name: c.tax_name, pct: Number(c.tax_percentage) || 0 }; });
+    }
+    var isGroup = tax.tax_type === 'tax_group' || /^gst\d/i.test(String(tax.tax_name || ''));
+    if (!isGroup || !pct) return [{ name: tax.tax_name, pct: pct }];
+    if (inter || tax.tax_specification === 'inter') return [{ name: 'IGST' + fmtPct(pct), pct: pct }];
+    var h = pct / 2;
+    return [{ name: 'CGST' + fmtPct(h), pct: h }, { name: 'SGST' + fmtPct(h), pct: h }];
   }
 
   function recalc() {
@@ -845,27 +1752,53 @@ function cfDefByLabel(label) {
 
     var box = $('tTaxes');
     box.innerHTML = '';
+    var inter = taxIsInter(), agg = {}, order = [];
     Object.keys(t.taxes).forEach(function (id) {
       var tx = S.taxMap[id];
-      var r = mk('div', { class: 't-row' }, box);
-      mk('span', { text: tx ? tx.tax_name + ' (' + tx.tax_percentage + '%)' : 'Tax' }, r);
-      mk('b', { text: money(t.taxes[id]) }, r);
+      if (!tx) return;
+      var comps = taxComponents(tx, inter);
+      var sum = comps.reduce(function (a, c) { return a + c.pct; }, 0) || 1;
+      comps.forEach(function (c) {
+        var key = c.name + '|' + c.pct;                     // same tax on many rows -> one line
+        if (!agg[key]) { agg[key] = { name: c.name, pct: c.pct, amt: 0 }; order.push(key); }
+        agg[key].amt += t.taxes[id] * c.pct / sum;
+      });
     });
-    $('tTotal').textContent = money(t.total);
+    order.forEach(function (k) {
+      var a = agg[k], r = mk('div', { class: 't-row' }, box);
+      mk('span', { text: a.name + ' [' + fmtPct(a.pct) + '%]' }, r);
+      mk('b', { text: money(round(a.amt, precision())) }, r);
+    });
+    var w = withholding(t), grand = round(t.total + w.signed, precision());
+    $('tTds').textContent = w.type === 'tds' ? '- ' + money(w.amount) : money(w.amount);
+    $('tTotal').textContent = money(grand);
     $('tCur').textContent = S.currency ? S.currency.currency_code : '';
-    S.lastTotal = t.total;
+    S.lastTotal = grand;
   }
 
   /* ================= CUSTOMER / DEPENDENT FIELDS ================= */
   function setCurrency(cur) {
     var changed = S.currency && cur && String(S.currency.currency_id) !== String(cur.currency_id);
     S.currency = cur || S.baseCurrency;
-    $('currencyText').value = S.currency
+  
+    var label = S.currency
       ? S.currency.currency_code + (S.currency.currency_symbol ? ' (' + S.currency.currency_symbol + ')' : '')
       : '';
+  
+    // visible Currency field (input)
+    var disp = $('currencyTextDisplay');
+    if (disp) disp.value = label;
+  
+    // hint inside the Exchange Rate row (span)
+    var hint = $('currencyText');
+    if (hint) hint.textContent = label;
+  
     var foreign = S.currency && S.baseCurrency && String(S.currency.currency_id) !== String(S.baseCurrency.currency_id);
     $('exchWrap').hidden = !foreign;
     if (foreign) $('exchRate').value = S.currency.exchange_rate != null ? String(S.currency.exchange_rate) : '';
+  
+    S.rows.forEach(function (r) { if (r.refs.discSym) r.refs.discSym.textContent = curSym(); });
+    $('tCur').textContent = S.currency ? S.currency.currency_code : '';
     return changed;
   }
 
@@ -873,9 +1806,25 @@ function cfDefByLabel(label) {
     ADDR_FIELDS.forEach(function (f) { $(prefix + '_' + f[0]).value = (a && a[f[0]]) || ''; });
   }
 
+  function findCurrencyFor(contact) {
+  var id = contact.currency_id || (S.customer && S.customer.currency_id) || '';
+  var code = String(contact.currency_code || '').toUpperCase();
+  var cur = null;
+  if (id) {
+    cur = S.currencies.filter(function (c) { return String(c.currency_id) === String(id); })[0] || null;
+  }
+  if (!cur && code) {
+    cur = S.currencies.filter(function (c) { return String(c.currency_code).toUpperCase() === code; })[0] || null;
+  }
+  if (!cur && CONFIG.debug) {
+    console.warn('[SOWidget] Customer currency not found in /settings/currencies:', id, code, contact);
+  }
+  return cur;
+}
+
   function applyCustomer(contact) {
     S.contact = contact;
-    var cur = S.currencies.filter(function (c) { return String(c.currency_id) === String(contact.currency_id); })[0];
+    var cur = findCurrencyFor(contact);
     var changed = setCurrency(cur || S.baseCurrency);
     $('rowNotice').textContent = (changed && S.rows.some(function (r) { return !isPristine(r); }))
       ? 'Currency changed to ' + S.currency.currency_code + '. Review the item rates.' : '';
@@ -886,9 +1835,22 @@ function cfDefByLabel(label) {
     if (!S.addrDirty.b) fillAddress('b', contact.billing_address);
     if (!S.addrDirty.s) fillAddress('s', contact.shipping_address);
 
+    // NEW: Populate Place of Supply and Source Location from customer
+    if (contact.place_of_contact && $('placeOfSupply')) {
+      $('placeOfSupply').value = contact.place_of_contact;
+    }
+    if (contact.billing_address && contact.billing_address.state_code && $('location')) {
+      var sc = contact.billing_address.state_code;
+      var curP = S.locations.filter(function (l) { return String(l.location_id) === $('location').value; })[0];
+      if (!(curP && curP.address && curP.address.state_code === sc)) {      // keep the current parent if it already matches
+        var match = S.locations.filter(function (l) { return l.address && l.address.state_code === sc; })[0];
+        if (match) { $('location').value = String(match.location_id); fillWarehouses(); }
+      }
+    }
+
     if (!S.touched.priceList && contact.pricebook_id) {
       var pb = S.pricebooks.filter(function (p) { return String(p.pricebook_id) === String(contact.pricebook_id); })[0];
-      if (pb) { $('priceList').value = String(pb.pricebook_id); S.pricebook = pb; }
+      if (pb) { $('priceList').value = String(pb.pricebook_id); S.pricebook = pb; S.rows.forEach(function (r) { setRowPb(r, pb); }); }
     }
 
     $('customerHint').textContent = contact.company_name && contact.company_name !== contact.contact_name ? contact.company_name : '';
@@ -896,13 +1858,14 @@ function cfDefByLabel(label) {
     renderRowsPrecision();
     recalc();
     checkField('customer');
+    ciRender();
   }
-
   function renderRowsPrecision() {
     $('tCur').textContent = S.currency ? S.currency.currency_code : '';
   }
 
   function selectCustomer(c) {
+    ciReset();
     S.customer = c;
     S.contact = null;
     $('customer').value = c.contact_name || $('customer').value;
@@ -929,6 +1892,7 @@ function cfDefByLabel(label) {
     $('customerClear').hidden = true;
     $('customerHint').textContent = '';
     setCurrency(S.baseCurrency);
+    ciReset(); ciRender();
   }
 
   /* ================= CUSTOMER CACHE (IndexedDB) ================= */
@@ -978,8 +1942,8 @@ function cfDefByLabel(label) {
     var name = c.contact_name || '', comp = c.company_name || '', email = c.email || '', ph = c.phone || c.mobile || '';
     return {
       contact_id: String(c.contact_id), contact_name: name, company_name: comp, email: email, phone: ph,
-      status: c.status || 'active', currency_id: c.currency_id || '',
-      _k: (name + ' ' + comp + ' ' + email + ' ' + ph).toLowerCase()
+      status: c.status || 'active', currency_id: c.currency_id || '', currency_code: c.currency_code || '',
+            _k: (name + ' ' + comp + ' ' + email + ' ' + ph).toLowerCase()
     };
   }
 
@@ -1450,9 +2414,7 @@ function cfDefByLabel(label) {
     }
 
     function paintActive() {
-      Array.prototype.forEach.call(list.querySelectorAll('.rs-item'), function (n) {
-        n.classList.toggle('active', Number(n.dataset.i) === st.active);
-      });
+      Array.prototype.forEach.call(list.querySelectorAll('.lk-item'), function (n, i) { n.classList.toggle('active', i === st.active); });
     }
 
     function paint() {
@@ -1739,6 +2701,8 @@ function cfDefByLabel(label) {
       }
     });
     $('newCustClose').addEventListener('click', closeNewCustomerModal);
+    $('placeOfSupply').addEventListener('change', recalc);
+    $('location').addEventListener('change', recalc);
     $('newCustCancel').addEventListener('click', closeNewCustomerModal);
     $('newCustSave').addEventListener('click', saveNewCustomer);
     $('newCustModal').addEventListener('mousedown', function (ev) {
@@ -1955,17 +2919,112 @@ function cfDefByLabel(label) {
       Array.prototype.forEach.call(list.children, function (n, i) { n.classList.toggle('active', i === st.active); });
     }
 
+
+    /* ================= NEW TAX (GST component) ================= */
+var NT = { saving: false, wired: false, row: null };
+var NT_TYPES = [['cgst', 'CGST'], ['sgst', 'SGST'], ['igst', 'IGST'], ['utgst', 'UTGST'], ['cess', 'Cess']];
+
+function ntClose() { if (!NT.saving) $('ntModal').hidden = true; }
+
+function openNewTaxModal(row) {
+  NT.row = row || null;
+  if (!NT.wired) {
+    NT.wired = true;
+    $('ntSave').addEventListener('click', ntSave);
+    $('ntCancel').addEventListener('click', ntClose);
+    $('ntClose').addEventListener('click', ntClose);
+    $('ntModal').addEventListener('mousedown', function (ev) { if (ev.target === $('ntModal')) ntClose(); });
+    $('ntModal').addEventListener('keydown', function (ev) {
+      ev.stopPropagation();
+      if (ev.key === 'Escape') { ev.preventDefault(); ntClose(); }
+      else if (ev.key === 'Enter' && ev.target.tagName === 'INPUT') { ev.preventDefault(); ntSave(); }
+    });
+  }
+  ['nt_name', 'nt_rate'].forEach(function (id) { $(id).value = ''; mark($(id), ''); });
+  fillOptions($('nt_type'), NT_TYPES, 'Select a Tax Type.');
+  lookupEnhance($('nt_type'));
+  $('nt_type').value = '';
+  $('ntStatus').textContent = '';
+  NT.saving = false;
+  $('ntSave').disabled = false;
+  $('ntModal').hidden = false;
+  setTimeout(function () { $('nt_name').focus(); }, 30);
+}
+
+function ntValidate() {
+  var ok = true, name = nv('nt_name'), r = nv('nt_rate'), n = toNum(r);
+  mark($('nt_name'), ''); mark($('nt_rate'), '');
+  if (!name) { mark($('nt_name'), 'Tax name is required'); ok = false; }
+  else if (name.length > 100) { mark($('nt_name'), 'Tax name is too long'); ok = false; }
+  else if (S.taxes.some(function (t) { return String(t.tax_name || '').toLowerCase() === name.toLowerCase(); })) {
+    mark($('nt_name'), 'A tax with this name already exists'); ok = false;
+  }
+  if (!r) { mark($('nt_rate'), 'Rate is required'); ok = false; }
+  else if (!isFinite(n) || n < 0 || n > 100) { mark($('nt_rate'), 'Enter a rate between 0 and 100'); ok = false; }
+  else if (decimals(r) > 4) { mark($('nt_rate'), 'Maximum 4 decimal places'); ok = false; }
+  return ok;
+}
+
+function ntDone(t) {
+  NT.saving = false;
+  $('ntSave').disabled = false;
+  var id = String(t.tax_id);
+  if (!S.taxMap[id]) { S.taxes.push(t); S.taxMap[id] = t; }
+  refreshTaxSelects();
+  $('ntModal').hidden = true;
+  if (NT.row) { NT.row.refs.tax.value = id; onRowChange(NT.row); }   // select the new tax on this row
+  else recalc();
+}
+
+function ntSave() {
+  if (NT.saving || !ntValidate()) return;
+  NT.saving = true;
+  $('ntSave').disabled = true;
+  $('ntStatus').textContent = 'Saving…';
+  var p = { tax_name: nv('nt_name'), tax_percentage: toNum(nv('nt_rate')), tax_type: 'tax' };
+  if ($('nt_type').value) p.tax_specific_type = $('nt_type').value;
+  if (CONFIG.debug) console.log('%c[Create tax payload]', 'color:#7a3db8', p);
+
+  function fail(msg) { NT.saving = false; $('ntSave').disabled = false; $('ntStatus').textContent = msg; }
+
+  api('POST', '/settings/taxes', {}, p).then(function (res) {
+    var t = res && res.tax;
+    if (!t || !t.tax_id) throw mkErr('unconfirmed', 'Zoho Books did not return the created tax.', true);
+    ntDone(t);
+  }).catch(function (e) {
+    if (e && e.uncertain) {
+      $('ntStatus').textContent = 'No confirmation received – checking Zoho Books…';
+      return loadTaxes(true).then(function () {
+        var hit = S.taxes.filter(function (t) { return String(t.tax_name || '').toLowerCase() === p.tax_name.toLowerCase(); })[0];
+        if (hit) ntDone(hit); else fail('Zoho Books did not confirm the tax was created. Check Settings ▸ Taxes before saving again.');
+      }, function () { fail('Could not confirm whether the tax was created.'); });
+    }
+    fail('Save failed: ' + errText(e));
+  });
+}
+
     function paint() {
       var q = search.value.trim().toLowerCase(), cur = LK_VALUE.get.call(sel);
-      st.items = Array.prototype.filter.call(sel.options, function (o) { return !q || o.text.toLowerCase().indexOf(q) > -1; });
-      list.innerHTML = '';
+      st.items = Array.prototype.filter.call(sel.options, function (o) {
+        return !q || (o.text + ' ' + ((o.dataset && o.dataset.desc) || '')).toLowerCase().indexOf(q) > -1;
+      });      list.innerHTML = '';
       if (!st.items.length) { mk('div', { class: 'cust-msg', text: 'No matches found' }, list); return; }
       if (st.active >= st.items.length) st.active = 0;
+      var lastG = '';
       st.items.forEach(function (o, i) {
+        var g = o.dataset && o.dataset.group;
+        if (g && g !== lastG) { mk('div', { class: 'lk-grp', text: g }, list); lastG = g; }
         var d = mk('div', {
-          class: 'lk-item' + (i === st.active ? ' active' : '') + (o.value === cur ? ' chosen' : ''),
-          text: o.text || '— None —'
+          class: 'lk-item' + (i === st.active ? ' active' : '') + (o.value === cur ? ' chosen' : '')
         }, list);
+        if (o.dataset && o.dataset.desc) {
+          mk('div', { class: 'lk-t', text: o.text }, d);
+          mk('div', { class: 'lk-d', text: o.dataset.desc }, d);
+          if (o.dataset.old) mk('div', { class: 'lk-o', text: 'Earlier: ' + o.dataset.old }, d);
+        } else {
+          d.textContent = o.text || '— None —';
+          if (o.dataset && o.dataset.child) d.classList.add('lk-child');
+        }
         d.addEventListener('mousedown', function (ev) { ev.preventDefault(); choose(i); });
         d.addEventListener('mouseenter', function () { st.active = i; paintActive(); });
       });
@@ -2326,19 +3385,53 @@ function cfDefByLabel(label) {
 
   // Child warehouses are listed under their parent, if the API returns parent_location_id.
   // Zoho native look: primary location has no bullet, all others are prefixed
-  // with "• " and suffixed with " (Warehouse)".
+  function locState(l) { var a = l && l.address; return a ? (a.state || a.state_code || '') : ''; }
+
+  // parent locations only (top "Location" field)
   function soLocList() {
     return S.locations.map(function (l) {
-      var primary = !!l.is_primary; 
-      return {
-        location_id: l.location_id,
-        location_name: (primary ? '' : '\u2022 ') + l.location_name + (primary ? '' : ' (Warehouse)'),
-        is_primary: primary,
-        parent_location_id: l.parent_location_id
-      };
+      return { location_id: l.location_id, location_name: l.location_name, is_primary: l.is_primary };
     });
   }
-
+  
+  // child warehouses of one parent; a parent with no active children is offered as its own warehouse
+  // parent first (selectable), then its child warehouses
+  function whList(parentId) {
+    var p = S.locations.filter(function (l) { return String(l.location_id) === String(parentId); })[0];
+    if (!p) return [];
+    var out = [{ location_id: p.location_id, location_name: p.location_name, is_child: false }];
+    (p.children || []).forEach(function (c) {
+      out.push({ location_id: c.location_id, location_name: c.location_name, is_child: true });
+    });
+    return out;
+  }
+  
+  // like fillSelect, but marks child options so the dropdown can indent them
+  function fillWh(sel, list, selectedVal) {
+    sel.innerHTML = '';
+    list.forEach(function (o) {
+      var opt = mk('option', { value: String(o.location_id), text: o.location_name }, sel);
+      if (o.is_child) opt.dataset.child = '1';
+    });
+    if (selectedVal !== undefined) sel.value = selectedVal;
+  }
+  
+  // rebuild the warehouse dropdowns after the parent location changes
+  function fillWarehouses() {
+    var list = whList($('location').value);
+    function has(v) { return list.some(function (x) { return String(x.location_id) === String(v); }); }
+    var def = list.length ? String(list[0].location_id) : '';   // parent is the default
+    var keep = $('itemLocation').value;
+    fillWh($('itemLocation'), list, has(keep) ? keep : def);
+    S.rows.forEach(function (r) {
+      if (!r.refs.loc) return;
+      var cur = r.refs.loc.value;
+      fillWh(r.refs.loc, list, has(cur) ? cur : def);
+      r.loc = r.refs.loc.value;
+    });
+    S.prevWh = $('itemLocation').value;
+    updateSourceHint();
+  }
   /* ================= NEW ITEM MODAL ================= */
   var NI = { built: false, saving: false, row: null, accounts: [], vendors: [], cfDefs: [], loading: null };
   var UNITS = ['box', 'cm', 'dz', 'ft', 'g', 'in', 'kg', 'km', 'lb', 'm', 'mg', 'ml', 'pcs'];
@@ -2373,7 +3466,6 @@ function cfDefByLabel(label) {
       niRow('Name', 'ni_name', niInp('ni_name'), 1) +
       niRow('Type', '', niRadios('ni_type', [['goods', 'Goods', 1], ['service', 'Service']])) +
       niRow('Category', 'ni_cat', '<input type="text" id="ni_cat" class="w-main" disabled placeholder="Not available via API">') +
-      niRow('Brand', 'ni_brand', niInp('ni_brand', 'placeholder="Brand"')) +
       niRow('Manufacturer', 'ni_mfr', niInp('ni_mfr')) +
       (gst ? niRow('HSN Code', 'ni_hsn', niInp('ni_hsn', 'maxlength="10"')) : '') +
       niRow('Tax Preference', 'ni_tax', niSel('ni_tax'), 1) +
@@ -2540,9 +3632,10 @@ function cfDefByLabel(label) {
     if (!NI.saving) $('itemModal').hidden = true;
   }
 
-  function openItemModal(row) {
+  function openItemModal(row, mode) {
     niWire();
     NI.row = row || null;
+    NI.mode = mode || 'new';
     var m = $('itemModal');
     Array.prototype.forEach.call(m.querySelectorAll('input[type=text], input[type=date], textarea'), function (el) {
       if (!el.disabled) el.value = '';
@@ -2555,6 +3648,8 @@ function cfDefByLabel(label) {
     $('ni_sell').checked = true;
     $('ni_buy').checked = true;
     $('ni_track').checked = false;
+    Array.prototype.forEach.call(m.querySelectorAll('input,select,textarea'), function (e) { e.disabled = (e.id === 'ni_cat'); });
+$('niTitle').textContent = 'New Item'; $('niSave').hidden = false;
     niSync();
     m.hidden = false;
     NI.saving = false;
@@ -2562,10 +3657,50 @@ function cfDefByLabel(label) {
     $('niStatus').textContent = 'Loading…';
     niLoad().then(function () {
       niPopulate();
+      if (NI.mode !== 'new' && NI.row && NI.row.item) niFill(NI.row.item, NI.mode);
       $('niSave').disabled = false;
       $('niStatus').textContent = '';
       $('ni_name').focus();
     });
+  }
+
+
+  function niFill(it, mode) {
+    function set(id, v) { var e = $(id); if (e && v !== undefined && v !== null) e.value = String(v); }
+    niSetRadio('ni_type', it.product_type === 'service' ? 'service' : 'goods');
+    set('ni_name', it.name); set('ni_brand', it.brand); set('ni_mfr', it.manufacturer); set('ni_hsn', it.hsn_or_sac);
+    set('ni_unit', it.unit); set('ni_sku', it.sku); set('ni_desc', it.description);
+    var t = it.item_type || 'sales_and_purchases', inv = t === 'inventory';
+    $('ni_sell').checked = inv || /sales/.test(t);
+    $('ni_buy').checked = inv || /purchases/.test(t);
+    set('ni_rate', it.rate); set('ni_sellAcc', it.account_id); set('ni_sellDesc', it.description);
+    set('ni_cost', it.purchase_rate); set('ni_buyAcc', it.purchase_account_id);
+    set('ni_buyDesc', it.purchase_description); set('ni_vendor', it.vendor_id);
+    $('ni_tax').value = it.is_taxable === false ? 'exempt' : 'taxable';
+    set('ni_exempt', it.tax_exemption_id); set('ni_taxId', it.tax_id);
+    (it.item_tax_preferences || []).forEach(function (p) {
+      set(p.tax_specification === 'inter' ? 'ni_taxInter' : 'ni_taxIntra', p.tax_id);
+    });
+    $('ni_track').checked = inv; set('ni_invAcc', it.inventory_account_id); set('ni_reorder', it.reorder_level);
+    niSetRadio('ni_trk', it.track_serial_number ? 'serial' : (it.track_batch_number ? 'batch' : 'none'));
+    niSetRadio('ni_ret', it.is_returnable === false ? '0' : '1');
+    var pk = it.package_details || {};
+    set('ni_len', pk.length); set('ni_wid', pk.width); set('ni_hgt', pk.height); set('ni_wt', pk.weight);
+    set('ni_dimU', pk.dimension_unit); set('ni_wtU', pk.weight_unit);
+    (it.custom_fields || []).forEach(function (c) {
+      var e = $('nif_' + c.customfield_id);
+      if (!e) return;
+      if (e.type === 'checkbox') e.checked = String(c.value) === 'true'; else e.value = c.value || '';
+    });
+    (it.tags || []).forEach(function (t2) {
+      var e = $('nit_' + t2.tag_id);
+      if (e && t2.tag_option_id) e.value = String(t2.tag_option_id);
+    });
+    niSync();
+    var ro = mode === 'view';
+    $('niTitle').textContent = ro ? 'Item Details' : 'Edit Item';
+    $('niSave').hidden = ro;
+    if (ro) Array.prototype.forEach.call($('niBody').querySelectorAll('input,select,textarea'), function (e) { e.disabled = true; });
   }
 
   function niValidate() {
@@ -2589,6 +3724,7 @@ function cfDefByLabel(label) {
     var goods = niVal('ni_type') === 'goods', sell = $('ni_sell').checked, buy = $('ni_buy').checked;
     if (!nv('ni_name')) bad('ni_name', 'Name is required');
     if (!nv('ni_unit')) bad('ni_unit', 'Unit is required');
+    if ($('ni_hsn') && !nv('ni_hsn')) bad('ni_hsn', (niVal('ni_type') === 'service' ? 'SAC' : 'HSN') + ' code is required');
     if (!sell && !buy) bad('ni_sell', 'Select sales and/or purchase information');
     if (sell) {
       num('ni_rate', 'Selling price', true);
@@ -2682,10 +3818,15 @@ function cfDefByLabel(label) {
   }
 
   function niDone(it) {
-    NI.saving = false;
-    $('niSave').disabled = false;
-    $('itemModal').hidden = true;
-    if (NI.row) selectItem(NI.row, it);   // fills the row exactly like picking from the dropdown
+    NI.saving = false; $('niSave').disabled = false; $('itemModal').hidden = true;
+    if (!NI.row) return;
+    if (NI.mode === 'edit') {          // keep qty / rate / tax / discount as they are
+      var r = NI.row; Object.assign(r.item, it);
+      r.refs.item.value = r.item.name;
+      r.refs.brand.textContent = r.item.brand || '';
+      r.refs.brand.parentNode.dataset.empty = r.item.brand ? '0' : '1';
+      showMeta(r);
+    } else selectItem(NI.row, it);
   }
 
   function niFail(msg) {
@@ -2711,12 +3852,13 @@ function cfDefByLabel(label) {
     var p = niPayload();
     if (CONFIG.debug) console.log('%c[Create item payload]', 'color:#7a3db8', p);
 
-    api('POST', '/items', {}, p).then(function (res) {
+    var edit = NI.mode === 'edit';
+api(edit ? 'PUT' : 'POST', edit ? '/items/' + NI.row.item.item_id : '/items', {}, p).then(function (res) {
       var it = res && res.item;
       if (!it || !it.item_id) throw mkErr('unconfirmed', 'Zoho Books did not return the created item.', true);
       niDone(it);
     }).catch(function (e) {
-      if (e && e.uncertain) {   // same "don't double-create" pattern as customers
+      if (e && e.uncertain && !edit) {   // same "don't double-create" pattern as customers
         $('niStatus').textContent = 'No confirmation received – checking Zoho Books…';
         return api('GET', '/items', { name_contains: p.name, per_page: 10 }).then(function (j) {
           var hit = firstArray(j, 'items').filter(function (i) {
@@ -2732,6 +3874,304 @@ function cfDefByLabel(label) {
     });
   }
 
+
+
+  /* ================= ADD ITEMS IN BULK ================= */
+  var BK = {
+    wired: false, all: [], loaded: false, loading: false, err: '',
+    sel: [], cats: [], parent: {}, catSel: {}, tmpCat: {},
+    items: [], shown: 0, q: '', adding: false
+  };
+
+  function bkMatch(it, toks) {
+    var hay = [it.name, it.sku, it.hsn_or_sac, it.description, it.upc, it.ean, it.isbn, it.part_number,
+      it.category_name, it.brand, it.manufacturer, it.rate].join(' ').toLowerCase();
+    return toks.every(function (t) { return hay.indexOf(t) > -1; });
+  }
+
+  function bkCatIds() {
+    var keys = Object.keys(BK.catSel).filter(function (k) { return BK.catSel[k]; });
+    if (!keys.length) return null;
+    var out = {};
+    keys.forEach(function (k) { out[k] = 1; });
+    if ($('bkSub').checked) {
+      var again = true;
+      while (again) {
+        again = false;
+        Object.keys(BK.parent).forEach(function (id) {
+          if (!out[id] && out[BK.parent[id]]) { out[id] = 1; again = true; }
+        });
+      }
+    }
+    return out;
+  }
+
+  function bkFilter() {
+    var toks = BK.q.toLowerCase().split(/\s+/).filter(Boolean), ids = bkCatIds();
+    BK.items = BK.all.filter(function (it) {
+      if (ids && !ids[String(it.category_id)]) return false;
+      return !toks.length || bkMatch(it, toks);
+    });
+    bkPaint();
+  }
+
+  function bkMsg(t) {
+    var l = $('bkList');
+    l.innerHTML = '';
+    mk('div', { class: 'cust-msg', text: t }, l);
+  }
+
+  function bkPaint() {
+    if (BK.err && !BK.all.length) { bkMsg('Could not load items: ' + BK.err); return; }
+    if (BK.loading && !BK.all.length) { bkMsg('Loading items…'); return; }
+    if (!BK.items.length) { bkMsg('No items found'); return; }
+    $('bkList').innerHTML = '';
+    BK.shown = 0;
+    bkMore();
+  }
+
+  function bkIsSel(id) {
+    return BK.sel.some(function (s) { return String(s.item.item_id) === String(id); });
+  }
+
+  function bkMore() {
+    var box = $('bkList'), end = Math.min(BK.items.length, BK.shown + 80);
+    for (var i = BK.shown; i < end; i++) {
+      (function (it) {
+        var d = mk('div', { class: 'bk-it' + (bkIsSel(it.item_id) ? ' on' : '') }, box);
+        d.dataset.id = String(it.item_id);
+        var tx = mk('div', { class: 'bk-tx' }, d);
+        mk('div', { class: 'bk-nm', text: it.name }, tx);
+        var sub = [it.sku ? 'SKU: ' + it.sku : '', it.hsn_or_sac ? 'HSN/SAC: ' + it.hsn_or_sac : '',
+          'Rate: ' + curSym() + Number(it.rate || 0).toLocaleString(undefined, { minimumFractionDigits: precision(), maximumFractionDigits: precision() })]
+          .filter(Boolean).join('  ');
+        mk('div', { class: 'bk-sb', text: sub }, tx);
+        mk('span', { class: 'bk-ck', text: '✓' }, d);
+        d.addEventListener('click', function () { bkToggle(it); });
+      })(BK.items[i]);
+    }
+    BK.shown = end;
+  }
+
+  function bkSyncChecks() {
+    Array.prototype.forEach.call($('bkList').querySelectorAll('.bk-it'), function (n) {
+      n.classList.toggle('on', bkIsSel(n.dataset.id));
+    });
+  }
+
+  function bkToggle(it) {
+    var i = -1;
+    BK.sel.forEach(function (s, k) { if (String(s.item.item_id) === String(it.item_id)) i = k; });
+    if (i > -1) BK.sel.splice(i, 1);
+    else BK.sel.push({ item: it, qty: 1 });
+    bkSyncChecks();
+    bkRenderSel();
+  }
+
+  function bkTotals() {
+    var q = BK.sel.reduce(function (a, s) { return a + s.qty; }, 0);
+    $('bkCount').textContent = String(BK.sel.length);
+    $('bkQty').textContent = String(round(q, CONFIG.maxQtyDecimals));
+    $('bkAdd').disabled = !BK.sel.length || BK.adding;
+  }
+
+  function bkRenderSel() {
+    var box = $('bkSel');
+    box.innerHTML = '';
+    BK.sel.forEach(function (s) {
+      var r = mk('div', { class: 'bk-sr' }, box);
+      mk('div', { class: 'bk-sn', text: s.item.name }, r);
+      var st = mk('div', { class: 'bk-step' }, r);
+      var minus = mk('button', { type: 'button', class: 'bk-sb-btn', text: '−' }, st);
+      var inp = mk('input', { type: 'text', inputMode: 'decimal', value: String(s.qty) }, st);
+      var plus = mk('button', { type: 'button', class: 'bk-sb-btn', text: '+' }, st);
+      var x = mk('button', { type: 'button', class: 'bk-x', title: 'Remove', innerHTML: '&times;' }, r);
+      minus.disabled = s.qty <= 1;
+
+      function set(v) {
+        s.qty = v;
+        inp.value = String(v);
+        minus.disabled = v <= 1;
+        bkTotals();
+      }
+      minus.addEventListener('click', function () { set(Math.max(1, round(s.qty - 1, CONFIG.maxQtyDecimals))); });
+      plus.addEventListener('click', function () { set(round(s.qty + 1, CONFIG.maxQtyDecimals)); });
+      inp.addEventListener('input', function () {
+        var n = toNum(inp.value);
+        if (isFinite(n) && n > 0 && decimals(inp.value.trim()) <= CONFIG.maxQtyDecimals) { s.qty = n; bkTotals(); }
+      });
+      inp.addEventListener('blur', function () {
+        var n = toNum(inp.value);
+        set(isFinite(n) && n > 0 ? round(n, CONFIG.maxQtyDecimals) : 1);
+      });
+      x.addEventListener('click', function () {
+        BK.sel = BK.sel.filter(function (z) { return z !== s; });
+        bkSyncChecks();
+        bkRenderSel();
+      });
+    });
+    bkTotals();
+  }
+
+  /* ---- category dropdown ---- */
+  function bkCatLabel() {
+    var n = Object.keys(BK.catSel).filter(function (k) { return BK.catSel[k]; }).length;
+    $('bkCatLbl').textContent = n ? 'Category (' + n + ')' : 'Category';
+  }
+
+  function bkPaintCats() {
+    var q = $('bkCatSearch').value.trim().toLowerCase(), box = $('bkCatList');
+    box.innerHTML = '';
+    var list = BK.cats.filter(function (c) { return !q || c.name.toLowerCase().indexOf(q) > -1; });
+    if (!list.length) { mk('div', { class: 'cust-msg', text: BK.loading ? 'Loading…' : 'No categories found' }, box); return; }
+    list.forEach(function (c) {
+      var lab = mk('label', { class: 'bk-cat-it' }, box);
+      var cb = mk('input', { type: 'checkbox' }, lab);
+      cb.checked = !!BK.tmpCat[c.id];
+      mk('span', { text: c.name }, lab);
+      cb.addEventListener('change', function () { BK.tmpCat[c.id] = cb.checked; });
+    });
+  }
+
+  function bkCatOpen() {
+    BK.tmpCat = Object.assign({}, BK.catSel);
+    $('bkCatSearch').value = '';
+    $('bkCatPanel').hidden = false;
+    bkPaintCats();
+    setTimeout(function () { $('bkCatSearch').focus(); }, 0);
+  }
+  function bkCatClose() { $('bkCatPanel').hidden = true; }
+
+  // categories come from the loaded items; /categories (if the org supports it) adds sub-category links
+  function bkBuildCats() {
+    var m = {};
+    BK.all.forEach(function (it) { if (it.category_id && it.category_name) m[String(it.category_id)] = it.category_name; });
+    return api('GET', '/categories').then(function (j) {
+      firstArray(j, 'categories').forEach(function (c) {
+        var id = String(c.category_id || '');
+        if (!id) return;
+        if (!m[id]) m[id] = c.name || c.category_name || id;
+        if (c.parent_category_id) BK.parent[id] = String(c.parent_category_id);
+      });
+    }).catch(function () { /* optional */ }).then(function () {
+      BK.cats = Object.keys(m).map(function (id) { return { id: id, name: m[id] }; })
+        .sort(function (a, b) { return a.name.toLowerCase().localeCompare(b.name.toLowerCase()); });
+      bkPaintCats();
+    });
+  }
+
+  /* ---- load every active item once, then filter locally ---- */
+  function bkLoadItems() {
+    if (BK.loaded || BK.loading) return Promise.resolve();
+    BK.loading = true;
+    BK.err = '';
+    bkPaint();
+    var all = [], page = 1;
+    function next() {
+      return api('GET', '/items', { filter_by: 'Status.Active', per_page: 200, page: page, sort_column: 'name' }).then(function (j) {
+        var list = firstArray(j, 'items');
+        all = all.concat(list);
+        if (page === 1) { BK.all = all; bkFilter(); }
+        $('bkStatus').textContent = 'Loading items… ' + all.length;
+        if (j.page_context && j.page_context.has_more_page && list.length && page < 200) { page++; return next(); }
+      });
+    }
+    return next().then(function () {
+      BK.all = all;
+      BK.loaded = true;
+      $('bkStatus').textContent = '';
+      return bkBuildCats();
+    }).catch(function (e) {
+      BK.err = errText(e);
+      $('bkStatus').textContent = '';
+    }).then(function () {
+      BK.loading = false;
+      bkFilter();
+    });
+  }
+
+  /* ---- add the selected items as sales-order rows ---- */
+  function bkAdd() {
+    if (!BK.sel.length || BK.adding) return;
+    BK.adding = true;
+    $('bkAdd').disabled = true;
+    $('bkStatus').textContent = 'Adding items…';
+
+    var free = S.rows.filter(isPristine);              // reuse the empty starter row(s) first
+    var jobs = BK.sel.map(function (s) {
+      var row = free.shift() || addRow();
+      return { row: row, item: s.item, qty: s.qty };
+    });
+
+    var chunks = [];
+    for (var i = 0; i < jobs.length; i += 5) chunks.push(jobs.slice(i, i + 5));
+    chunks.reduce(function (p, ch) {
+      return p.then(function () {
+        return Promise.all(ch.map(function (j) { return selectItem(j.row, j.item, j.qty); }));
+      });
+    }, Promise.resolve()).then(function () {
+      var failed = jobs.filter(function (j) { return !j.row.item; }).length;
+      BK.adding = false;
+      recalc();
+      if (failed) {
+        $('bkStatus').textContent = failed + ' item(s) could not be loaded – see the red message on those rows.';
+      }
+      $('bkModal').hidden = true;
+    });
+  }
+
+  function bkClose() { if (!BK.adding) $('bkModal').hidden = true; }
+
+  function bkWire() {
+    if (BK.wired) return;
+    BK.wired = true;
+    var t = null;
+    $('bkSearch').addEventListener('input', function () {
+      clearTimeout(t);
+      t = setTimeout(function () { BK.q = $('bkSearch').value; bkFilter(); }, 150);
+    });
+    $('bkList').addEventListener('scroll', function () {
+      var l = $('bkList');
+      if (BK.shown < BK.items.length && l.scrollTop + l.clientHeight > l.scrollHeight - 120) bkMore();
+    });
+    $('bkSub').addEventListener('change', bkFilter);
+    $('bkCatBtn').addEventListener('click', function () { if ($('bkCatPanel').hidden) bkCatOpen(); else bkCatClose(); });
+    $('bkCatSearch').addEventListener('input', bkPaintCats);
+    $('bkCatApply').addEventListener('click', function () {
+      BK.catSel = Object.assign({}, BK.tmpCat);
+      bkCatClose();
+      bkCatLabel();
+      bkFilter();
+    });
+    $('bkAdd').addEventListener('click', bkAdd);
+    $('bkCancel').addEventListener('click', bkClose);
+    $('bkClose').addEventListener('click', bkClose);
+    $('bkModal').addEventListener('mousedown', function (ev) { if (ev.target === $('bkModal')) bkClose(); });
+    document.addEventListener('mousedown', function (ev) {
+      if (!$('bkCatPanel').hidden && !$('bkCatWrap').contains(ev.target)) bkCatClose();
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key !== 'Escape' || $('bkModal').hidden) return;
+      if (!$('bkCatPanel').hidden) bkCatClose(); else bkClose();
+    });
+  }
+
+  function openBulk() {
+    bkWire();
+    BK.sel = [];
+    BK.q = '';
+    BK.catSel = {};
+    BK.adding = false;
+    $('bkSearch').value = '';
+    $('bkSub').checked = false;
+    $('bkStatus').textContent = '';
+    bkCatLabel();
+    bkRenderSel();
+    $('bkModal').hidden = false;
+    bkFilter();
+    bkLoadItems();
+    setTimeout(function () { $('bkSearch').focus(); }, 30);
+  }
   /* ================= FORM-WIDE VALIDATION ================= */
   function validateAll() {
     var errs = [], firstBad = null;
@@ -2765,6 +4205,491 @@ function cfDefByLabel(label) {
     return { errs: errs, first: firstBad };
   }
 
+
+
+  /* ================= CUSTOMER ADDRESS + GST BLOCK ================= */
+  var CI = { ov: {}, gstOv: null, gstShip: null, pop: null, pending: false, wired: false };
+
+  var CI_PENCIL = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
+
+  function ciReset() {
+    CI.ov = {}; CI.gstOv = null; CI.gstShip = null;
+    S.addrDirty.b = false; S.addrDirty.s = false;   // a new customer brings its own addresses
+    ciClosePop(); ciCloseDialog();
+  }
+
+  function ciBox() { return $('custInfo'); }
+
+  function ciInit() {
+    if (CI.wired) return;
+    CI.wired = true;
+    var hint = $('customerHint');
+    if (hint && !$('custInfo')) {
+      var box = mk('div', { id: 'custInfo', class: 'cust-info' });
+      hint.parentNode.insertBefore(box, hint.nextSibling);
+      box.hidden = true;
+    }
+    document.addEventListener('mousedown', function (ev) {
+      if (CI.pop && !CI.pop.el.contains(ev.target) && !(ev.target.closest && ev.target.closest('.ci-pencil'))) ciClosePop();
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape') { ciClosePop(); ciCloseDialog(); }
+    });
+  }
+
+  function ciHasAddr(a) {
+    if (!a) return false;
+    return ADDR_KEYS.some(function (k) { return a[k[0]] != null && String(a[k[0]]).trim() !== ''; });
+  }
+
+  function ciAddrOf(kind) {   // order-level override wins over the customer's saved address
+    if (CI.ov[kind]) return CI.ov[kind];
+    return S.contact ? S.contact[kind + '_address'] : null;
+  }
+
+  function ciEff() {          // GST values in effect for this order
+    var c = S.contact || {}, o = CI.gstOv || {};
+    function pick(k) { return Object.prototype.hasOwnProperty.call(o, k) ? o[k] : (c[k] || ''); }
+    return { treat: pick('gst_treatment'), gstin: pick('gst_no'), legal: pick('legal_name'), trade: pick('trade_name') };
+  }
+
+  function ciPencil(title, fn) {
+    var b = mk('button', { type: 'button', class: 'ci-pencil', title: title }, null);
+    b.setAttribute('aria-label', title);
+    b.innerHTML = CI_PENCIL;                       // static markup only
+    b.addEventListener('click', function (ev) { ev.preventDefault(); fn(b); });
+    return b;
+  }
+
+  function ciLink(text, fn) {
+    var b = mk('button', { type: 'button', class: 'ci-link', text: text }, null);
+    b.addEventListener('click', function (ev) { ev.preventDefault(); fn(); });
+    return b;
+  }
+
+
+  // Hide Place of Supply when the GST treatment doesn't need it (e.g. Overseas)
+function updatePlaceOfSupply() {
+  var wrap = $('posWrap'), sel = $('placeOfSupply');
+  if (!wrap || !sel) return;
+  var r = (S.customer && S.contact && detectGst()) ? GST_BY[ciEff().treat] : null;
+  var hide = !!(r && !r.pos);                 // pos:0 → Overseas
+  wrap.hidden = hide;
+  if (hide) { sel.value = ''; mark(sel, ''); }
+}
+
+  /* ---------- render ---------- */
+  function ciRender() {
+    var box = ciBox();
+    updatePlaceOfSupply();
+
+    if (!box) return;
+    ciClosePop();
+    box.innerHTML = '';
+    if (!S.customer || !S.contact) { box.hidden = true; return; }
+    box.hidden = false;
+
+    var row = mk('div', { class: 'ci-row' }, box);
+    ciAddrCol(row, 'billing');
+    ciAddrCol(row, 'shipping');
+
+    ciRemarks(box);
+
+    if (detectGst()) {
+      var g = mk('div', { class: 'ci-row ci-gst' }, box);
+      ciGstBilling(g);
+      ciGstShipping(g);
+    }
+  }
+
+  function ciAddrCol(parent, kind) {
+    var a = ciAddrOf(kind), col = mk('div', { class: 'ci-col' }, parent);
+    var h = mk('div', { class: 'ci-h' }, col);
+    mk('span', { text: kind === 'billing' ? 'Billing Address' : 'Shipping Address' }, h);
+    if (ciHasAddr(a)) {
+      h.appendChild(ciPencil('Edit ' + kind + ' address', function () { ciOpenAddr(kind, a, null); }));
+      var body = mk('div', { class: 'ci-addr' }, col);
+      if (a.attention) mk('div', { class: 'ci-att', text: a.attention }, body);
+      if (a.address) mk('div', { text: a.address }, body);
+      if (a.street2) mk('div', { text: a.street2 }, body);
+      var cityLine = [a.city, [a.state, a.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+      if (cityLine) mk('div', { text: cityLine }, body);
+      if (a.country) mk('div', { text: a.country }, body);
+      if (a.phone) mk('div', { class: 'ci-sub', text: 'Phone: ' + a.phone }, body);
+    } else {
+      var links = mk('div', { class: 'ci-links' }, col);
+      links.appendChild(ciLink('New Address', function () { ciOpenAddr(kind, null, null); }));
+      if (kind === 'shipping') {
+        mk('span', { class: 'ci-sep' }, links);
+        links.appendChild(ciLink('+ Dropshipping Address', function () { ciOpenAddr('dropship', null, 'Dropshipping Address'); }));
+      }
+    }
+  }
+
+  function ciGstBilling(parent) {
+    var e = ciEff(), r = GST_BY[e.treat], col = mk('div', { class: 'ci-col' }, parent);
+    mk('div', { class: 'ci-h', text: 'Billing Recipient GST Details' }, col);
+    var line = mk('div', { class: 'ci-kv' }, col);
+    mk('span', { class: 'ci-k', text: 'GST Treatment: ' }, line);
+    mk('span', { class: 'ci-v', text: r ? r.label : (e.treat || '—') }, line);
+    line.appendChild(ciPencil('Edit GST treatment', function (b) { ciOpenTreat(b); }));
+  }
+
+  function ciRemarks(parent) {
+    var txt = String((S.contact && S.contact.notes) || '').trim();
+    if (!txt) return;                       // hide the block when the customer has no remarks
+    var w = mk('div', { class: 'ci-remarks' }, parent);
+    mk('span', { class: 'ci-rem-l', text: 'Remarks' }, w);
+    mk('div', { class: 'ci-rem-v', text: txt }, w);   // textContent, so it is safe from HTML injection
+  }
+
+  function ciGstShipping(parent) {
+    var e = ciEff(), s = CI.gstShip || {}, col = mk('div', { class: 'ci-col' }, parent);
+    var h = mk('div', { class: 'ci-h' }, col);
+    mk('span', { text: 'Shipping Recipient GST Details' }, h);
+    h.appendChild(ciPencil('Edit shipping recipient GST details', function (b) { ciOpenShipGst(b); }));
+    var gstin = CI.gstShip ? (s.unreg ? '' : s.gst_no) : e.gstin;
+    var legal = CI.gstShip ? s.legal_name : e.legal;
+    var l1 = mk('div', { class: 'ci-kv' }, col);
+    mk('span', { class: 'ci-k', text: 'GSTIN: ' }, l1);
+    mk('span', { class: 'ci-v', text: gstin || '' }, l1);
+    var l2 = mk('div', { class: 'ci-kv' }, col);
+    mk('span', { class: 'ci-k', text: 'Business Legal Name: ' }, l2);
+    mk('span', { class: 'ci-v', text: legal || '' }, l2);
+  }
+
+  /* ---------- small popover (GST) ---------- */
+  function ciClosePop() {
+    if (CI.pop && CI.pop.el.parentNode) CI.pop.el.parentNode.removeChild(CI.pop.el);
+    CI.pop = null;
+  }
+
+  function ciField(parent, label, el) {
+    var w = mk('div', { class: 'ci-f' }, parent);
+    if (label) mk('label', { text: label }, w);
+    if (el) w.appendChild(el);
+    return w;
+  }
+
+  // build(body) fills the popup; update() does the work and may return a Promise or throw an Error.
+  function ciPop(anchor, title, build, update) {
+    ciClosePop();
+    var box = ciBox(), el = mk('div', { class: 'ci-pop', role: 'dialog' }, box);
+    var head = mk('div', { class: 'ci-pop-h' }, el);
+    mk('span', { text: title }, head);
+    var x = mk('button', { type: 'button', class: 'ci-x', title: 'Close', text: '×' }, head);
+    var body = mk('div', { class: 'ci-pop-b' }, el);
+    build(body);
+    var err = mk('div', { class: 'ci-err', hidden: true }, el);
+    var foot = mk('div', { class: 'ci-pop-f' }, el);
+    var ok = mk('button', { type: 'button', class: 'btn primary', text: 'Update' }, foot);
+    var cancel = mk('button', { type: 'button', class: 'btn', text: 'Cancel' }, foot);
+    var left = Math.max(0, anchor.getBoundingClientRect().left - box.getBoundingClientRect().left - 20);
+    var maxLeft = Math.max(0, box.clientWidth - 320);
+    el.style.left = Math.min(left, maxLeft) + 'px';
+    el.style.top = (anchor.getBoundingClientRect().bottom - box.getBoundingClientRect().top + 8) + 'px';
+    x.addEventListener('click', ciClosePop);
+    cancel.addEventListener('click', ciClosePop);
+    ok.addEventListener('click', function () {
+      if (CI.pending) return;
+      err.hidden = true;
+      CI.pending = true; ok.disabled = true; ok.textContent = 'Updating…';
+      var out;
+      try { out = Promise.resolve(update()); } catch (e) { out = Promise.reject(e); }
+      out.then(function () { CI.pending = false; ciRender(); }, function (e) {
+        CI.pending = false; ok.disabled = false; ok.textContent = 'Update';
+        err.textContent = errText(e); err.hidden = false;
+      });
+    });
+    CI.pop = { el: el };
+  }
+
+  // PUT the changed fields onto the customer (contact_name is sent too – the update endpoint expects it)
+  function ciPutContact(fields) {
+    var body = { contact_name: S.contact.contact_name };
+    Object.keys(fields).forEach(function (k) { body[k] = fields[k]; });
+    return api('PUT', '/contacts/' + S.customer.contact_id, null, body).then(function (j) {
+      return (j && j.contact) || {};
+    });
+  }
+
+  // function ciOpenTreat(anchor) {
+  //   var e = ciEff(), sel, gstin, gRow, perm;
+  //   ciPop(anchor, 'Configure Tax Preferences', function (body) {
+  //     sel = mk('select', {}, null);
+  //     mk('option', { value: '', text: 'Select a GST treatment' }, sel);
+  //     GST_TREATMENTS.forEach(function (t) { mk('option', { value: t.value, text: t.label }, sel); });
+  //     sel.value = GST_BY[e.treat] ? e.treat : '';
+  //     ciField(body, 'GST Treatment', sel);
+  //     gstin = mk('input', { type: 'text', maxLength: 15, autocomplete: 'off', value: e.gstin || '' }, null);
+  //     gRow = ciField(body, 'GSTIN / UIN', gstin);
+  //     function sync() { var r = GST_BY[sel.value]; gRow.hidden = !(r && r.reg); }
+  //     sel.addEventListener('change', sync); sync();
+  //     mk('div', { class: 'ci-ask', text: 'Make it permanent?' }, body);
+  //     var lab = mk('label', { class: 'ci-chk' }, body);
+  //     perm = mk('input', { type: 'checkbox' }, lab);
+  //     mk('span', { text: 'Use these settings for all future transactions of this customer.' }, lab);
+  //   }, function () {
+  //     var r = GST_BY[sel.value];
+  //     if (!r) throw new Error('Select a GST treatment');
+  //     var no = r.reg ? gstin.value.trim().toUpperCase() : '';
+  //     if (r.req && !no) throw new Error('GSTIN is required for this GST treatment');
+  //     if (no && !GSTIN_RE.test(no)) throw new Error('Enter a valid 15-character GSTIN');
+  //     if (!perm.checked) {           // this order only
+  //       CI.gstOv = CI.gstOv || {};
+  //       CI.gstOv.gst_treatment = r.api; CI.gstOv.gst_no = no;
+  //       return;
+  //     }
+  //     var f = { gst_treatment: r.api }; if (no) f.gst_no = no;
+  //     return ciPutContact(f).then(function (c) {
+  //       S.contact.gst_treatment = c.gst_treatment || r.api;
+  //       S.contact.gst_no = c.gst_no != null ? c.gst_no : no;
+  //       if (CI.gstOv) { delete CI.gstOv.gst_treatment; delete CI.gstOv.gst_no; }
+  //     });
+  //   });
+  // }
+
+  function ciOpenTreat(anchor) {
+    var e = ciEff(), gstin, gRow, perm;
+    var rsVal = GST_BY[e.treat] ? e.treat : '';
+
+    ciPop(anchor, 'Configure Tax Preferences', function (body) {
+      // Build the custom rich select UI
+      var rsWrap = mk('div', { class: 'rs-wrap w-main' }, body);
+      var rsBox = mk('div', { class: 'rs-box' }, rsWrap);
+      var txt = mk('input', { type: 'text', readOnly: true, placeholder: 'Select a GST treatment', value: GST_BY[rsVal] ? GST_BY[rsVal].label : '' }, rsBox);
+      mk('span', { class: 'cust-chev' }, rsBox);
+      
+      var panel = mk('div', { class: 'rs-panel', hidden: true }, rsWrap);
+      var sbox = mk('div', { class: 'cust-search' }, panel);
+      sbox.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8a94a6" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>';
+      var search = mk('input', { type: 'text', placeholder: 'Search', autocomplete: 'off' }, sbox);
+      var list = mk('div', { class: 'rs-list' }, panel);
+
+      var st = { open: false, active: 0, items: [] };
+
+      function paint() {
+        var q = search.value.trim().toLowerCase();
+        st.items = GST_TREATMENTS.filter(function (x) { 
+          return !q || (x.label + ' ' + x.desc).toLowerCase().indexOf(q) > -1; 
+        });
+        list.innerHTML = '';
+        if (!st.items.length) { mk('div', { class: 'cust-msg', text: 'No matches' }, list); return; }
+        if (st.active >= st.items.length) st.active = 0;
+        
+        st.items.forEach(function (x, i) {
+          var d = mk('div', { class: 'rs-item' + (i === st.active ? ' active' : '') + (rsVal === x.value ? ' chosen' : '') }, list);
+          d.dataset.i = String(i);
+          mk('div', { class: 't', text: x.label }, d);
+          if (x.desc) mk('div', { class: 'd', text: x.desc }, d);
+          d.addEventListener('mousedown', function (ev) { ev.preventDefault(); choose(i); });
+          d.addEventListener('mouseenter', function () { st.active = i; paintActive(); });
+        });
+      }
+
+      function paintActive() {
+        Array.prototype.forEach.call(list.querySelectorAll('.rs-item'), function (n) {
+          n.classList.toggle('active', Number(n.dataset.i) === st.active);
+        });
+      }
+
+      function open() {
+        if (st.open) return;
+        st.open = true;
+        panel.hidden = false;
+        rsBox.classList.add('open');
+        search.value = '';
+        st.active = Math.max(0, st.items.map(function (x) { return x.value; }).indexOf(rsVal));
+        paint();
+        setTimeout(function () { search.focus(); }, 0);
+      }
+
+      function close() {
+        if (!st.open) return;
+        st.open = false;
+        panel.hidden = true;
+        rsBox.classList.remove('open');
+      }
+
+      function choose(i) {
+        var x = st.items[i];
+        if (!x) return;
+        rsVal = x.value;
+        txt.value = x.label;
+        gRow.hidden = !x.reg;
+        close();
+        txt.focus();
+      }
+
+      rsBox.addEventListener('click', function () { if (st.open) close(); else open(); });
+      txt.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter' || ev.key === 'ArrowDown' || ev.key === ' ') { ev.preventDefault(); open(); }
+      });
+      search.addEventListener('input', function () { st.active = 0; paint(); });
+      search.addEventListener('keydown', function (ev) {
+        if (ev.key === 'ArrowDown') { ev.preventDefault(); st.active = Math.min(st.items.length - 1, st.active + 1); paintActive(); }
+        else if (ev.key === 'ArrowUp') { ev.preventDefault(); st.active = Math.max(0, st.active - 1); paintActive(); }
+        else if (ev.key === 'Enter') { ev.preventDefault(); choose(st.active); }
+        else if (ev.key === 'Escape') { ev.preventDefault(); close(); txt.focus(); }
+        else if (ev.key === 'Tab') close();
+      });
+
+      // Add GSTIN field below the rich select
+      gstin = mk('input', { type: 'text', maxLength: 15, autocomplete: 'off', value: e.gstin || '' }, null);
+      gRow = ciField(body, 'GSTIN / UIN', gstin);
+      var r = GST_BY[rsVal];
+      gRow.hidden = !(r && r.reg);
+
+      // Add permanent option
+      mk('div', { class: 'ci-ask', text: 'Make it permanent?' }, body);
+      var lab = mk('label', { class: 'ci-chk' }, body);
+      perm = mk('input', { type: 'checkbox' }, lab);
+      mk('span', { text: 'Use these settings for all future transactions of this customer.' }, lab);
+      
+    }, function () {
+      var r = GST_BY[rsVal];
+      if (!r) throw new Error('Select a GST treatment');
+      var no = r.reg ? gstin.value.trim().toUpperCase() : '';
+      if (r.req && !no) throw new Error('GSTIN is required for this GST treatment');
+      if (no && !GSTIN_RE.test(no)) throw new Error('Enter a valid 15-character GSTIN');
+      if (!perm.checked) {           // this order only
+        CI.gstOv = CI.gstOv || {};
+        CI.gstOv.gst_treatment = r.api; CI.gstOv.gst_no = no;
+        return;
+      }
+      var f = { gst_treatment: r.api }; if (no) f.gst_no = no;
+      return ciPutContact(f).then(function (c) {
+        S.contact.gst_treatment = c.gst_treatment || r.api;
+        S.contact.gst_no = c.gst_no != null ? c.gst_no : no;
+        if (CI.gstOv) { delete CI.gstOv.gst_treatment; delete CI.gstOv.gst_no; }
+      });
+    });
+  }
+  function ciOpenShipGst(anchor) {
+    var e = ciEff(), s = CI.gstShip || { gst_no: e.gstin, legal_name: e.legal, trade_name: e.trade, unreg: false };
+    var no, un, legal, trade;
+    ciPop(anchor, 'Shipping Recipient GST Details', function (body) {
+      var top = mk('div', { class: 'ci-f ci-f-inline' }, body);
+      mk('label', { text: 'GSTIN' }, top);
+      var lab = mk('label', { class: 'ci-chk' }, top);
+      un = mk('input', { type: 'checkbox', checked: !!s.unreg }, lab);
+      mk('span', { text: 'is Unregistered Person?' }, lab);
+      no = mk('input', { type: 'text', maxLength: 15, autocomplete: 'off', value: s.gst_no || '' }, null);
+      ciField(body, '', no);
+      legal = mk('input', { type: 'text', autocomplete: 'off', value: s.legal_name || '' }, null);
+      ciField(body, 'Business Legal Name', legal);
+      trade = mk('input', { type: 'text', autocomplete: 'off', value: s.trade_name || '' }, null);
+      ciField(body, 'Business Trade Name', trade);
+      function sync() { no.disabled = un.checked; }
+      un.addEventListener('change', sync); sync();
+    }, function () {
+      var g = no.value.trim().toUpperCase();
+      if (!un.checked && g && !GSTIN_RE.test(g)) throw new Error('Enter a valid 15-character GSTIN');
+      CI.gstShip = { gst_no: un.checked ? '' : g, unreg: un.checked, legal_name: legal.value.trim(), trade_name: trade.value.trim() };
+    });
+  }
+
+  /* ---------- address dialog ---------- */
+  function ciCloseDialog() {
+    var o = $('ciOverlay');
+    if (o && o.parentNode) o.parentNode.removeChild(o);
+  }
+
+  // kind: 'billing' | 'shipping' | 'dropship'
+  function ciOpenAddr(kind, a, title) {
+    ciCloseDialog(); ciClosePop();
+    a = a || {};
+    var ov = mk('div', { id: 'ciOverlay', class: 'ci-overlay' }, document.body);
+    var dlg = mk('div', { class: 'ci-dialog', role: 'dialog' }, ov);
+    var h = mk('div', { class: 'ci-dialog-h' }, dlg);
+    mk('span', { text: title || ((a && ciHasAddr(a) ? 'Edit ' : 'New ') + (kind === 'billing' ? 'Billing' : 'Shipping') + ' Address') }, h);
+    mk('button', { type: 'button', class: 'ci-x', title: 'Close', text: '×' }, h).addEventListener('click', ciCloseDialog);
+    var body = mk('div', { class: 'ci-dialog-b' }, dlg), F = {};
+    ADDR_KEYS.forEach(function (k) {
+      var el;
+      if (k[0] === 'country') {
+        el = mk('select', {}, null);
+        var list = COUNTRIES.slice();
+        if (a.country && list.indexOf(a.country) < 0) list.unshift(a.country);
+        mk('option', { value: '', text: 'Select' }, el);
+        list.forEach(function (c) { mk('option', { value: c, text: c }, el); });
+        el.value = a.country || (S.contact && S.contact.billing_address && S.contact.billing_address.country) || '';
+      } else if (k[0] === 'address' || k[0] === 'street2') {
+        el = mk('textarea', { rows: 2, placeholder: k[0] === 'address' ? 'Street 1' : 'Street 2', value: a[k[0]] || '' }, null);
+      } else {
+        el = mk('input', { type: 'text', autocomplete: 'off', value: a[k[0]] || '' }, null);
+      }
+      F[k[0]] = el;
+      ciField(body, k[0] === 'street2' ? '' : k[1], el);
+    });
+    var err = mk('div', { class: 'ci-err', hidden: true }, dlg);
+    var foot = mk('div', { class: 'ci-dialog-f' }, dlg);
+    var save = mk('button', { type: 'button', class: 'btn primary', text: kind === 'dropship' ? 'Use on this order' : 'Save' }, foot);
+    var cancel = mk('button', { type: 'button', class: 'btn', text: 'Cancel' }, foot);
+    var orderOnly = mk('button', { type: 'button', class: 'btn ghost', text: 'Use for this order only', hidden: true }, foot);
+    cancel.addEventListener('click', ciCloseDialog);
+
+    function read() {
+      var o = {};
+      ADDR_KEYS.forEach(function (k) { var v = String(F[k[0]].value || '').trim(); if (v) o[k[0]] = v; });
+      return o;
+    }
+    function showErr(m) { err.textContent = m; err.hidden = !m; }
+    function applyOrder(obj) {
+      var target = kind === 'billing' ? 'billing' : 'shipping';
+      CI.ov[target] = obj;
+      fillAddress(target === 'billing' ? 'b' : 's', obj);
+      S.addrDirty[target === 'billing' ? 'b' : 's'] = true;
+      ciCloseDialog(); ciRender();
+    }
+    orderOnly.addEventListener('click', function () {
+      var o = read(); if (!ciHasAddr(o)) { showErr('Enter at least one address field.'); return; }
+      applyOrder(o);
+    });
+    save.addEventListener('click', function () {
+      if (CI.pending) return;
+      var o = read();
+      if (!ciHasAddr(o)) { showErr('Enter at least one address field.'); return; }
+      showErr('');
+      if (kind === 'dropship') { applyOrder(o); return; }      // dropship addresses are used on this order only
+      CI.pending = true; save.disabled = true; save.textContent = 'Saving…';
+      var f = {}; f[kind + '_address'] = o;
+      ciPutContact(f).then(function (c) {
+        CI.pending = false;
+        var saved = c[kind + '_address'] || o;
+        S.contact[kind + '_address'] = saved;
+        delete CI.ov[kind];
+        fillAddress(kind === 'billing' ? 'b' : 's', saved);
+        S.addrDirty[kind === 'billing' ? 'b' : 's'] = true;
+        ciCloseDialog(); ciRender();
+      }, function (e) {
+        CI.pending = false; save.disabled = false; save.textContent = 'Save';
+        showErr('Could not save to the customer: ' + errText(e));
+        orderOnly.hidden = false;
+      });
+    });
+    var first = F.attention; if (first && first.focus) first.focus();
+  }
+
+  /* ---------- payload ---------- */
+  // Only sends what the user changed for THIS order; the customer's own values are used by Zoho otherwise.
+  function ciPayload(p) {
+    if (!S.contact) return;
+    var o = CI.gstOv;
+    if (o && Object.prototype.hasOwnProperty.call(o, 'gst_treatment')) {
+      p.gst_treatment = o.gst_treatment;
+      if (o.gst_no) p.gst_no = o.gst_no;
+    }
+    var sg = CI.gstShip, m = CONFIG.shipGstFields;
+    if (sg) {
+      if (m && typeof m === 'object') {     // set CONFIG.shipGstFields = { gst_no:'..', legal_name:'..', trade_name:'..' } once the real field names are verified
+        Object.keys(m).forEach(function (k) { if (m[k] && sg[k]) p[m[k]] = sg[k]; });
+      } else if (CONFIG.debug) {
+        console.warn('[SOWidget] Shipping recipient GST details are shown here only; no verified sales-order field to save them (set CONFIG.shipGstFields).');
+      }
+    }
+  }
+
   /* ================= PAYLOAD ================= */
   function addrPayload(prefix) {
     var o = {}, any = false;
@@ -2784,12 +4709,13 @@ function cfDefByLabel(label) {
       is_inclusive_tax: $('inclusive').checked
     };
     var v;
+    if ($('placeOfSupply') && $('placeOfSupply').value && !$('posWrap').hidden) {
+      p.place_of_supply = $('placeOfSupply').value;
+    }
     if ((v = $('shipDate').value)) p.shipment_date = v;
     if ((v = $('refNumber').value.trim())) p.reference_number = v;
     if ((v = $('soNumber').value.trim())) p.salesorder_number = v;
     if (!$('exchWrap').hidden) p.exchange_rate = toNum($('exchRate').value);
-    if (S.locations.length) p.location_id = String($('location').value);
-
     if ($('payTerms').value.trim() !== '') {
       var days = parseInt($('payTerms').value, 10);
       p.payment_terms = days;
@@ -2844,7 +4770,11 @@ function cfDefByLabel(label) {
     if (cfs.length) p.custom_fields = cfs;
     if (S.addrDirty.b) { var b = addrPayload('b'); if (b) p.billing_address = b; }
     if (S.addrDirty.s) { var s = addrPayload('s'); if (s) p.shipping_address = s; }
-
+    ciPayload(p);
+    var wh = withholding(currentTotals());
+    if (wh.tax && CONFIG.debug) {
+      console.warn('[SOWidget] ' + wh.type.toUpperCase() + ' is included in the displayed total only; no documented sales-order field is available to save it.');
+    }
     var order = 0;
     p.line_items = S.rows.filter(function (r) { return !isPristine(r); }).map(function (r) {
       var R = r.refs, li = {
@@ -2856,13 +4786,18 @@ function cfDefByLabel(label) {
       };
       if (R.desc.value.trim()) li.description = R.desc.value.trim();
       if (r.item.unit) li.unit = r.item.unit;
-      if (R.tax.value) li.tax_id = R.tax.value;
-      if (p.discount_type === 'item_level') {
-        var d = parseDiscount(R.disc.value, li.quantity * li.rate);
+      if (R.tax.value.indexOf('ex:') === 0) {
+        var exId = exemptionFor(R.tax.value.slice(3));
+        if (exId) li.tax_exemption_id = exId;
+        else if (CONFIG.debug) console.warn('[SOWidget] No matching tax exemption for', R.tax.value, '- row sent without tax');
+      } else if (R.tax.value) li.tax_id = R.tax.value;
+            if (p.discount_type === 'item_level') {
+        var d = parseDiscount(discText(r), li.quantity * li.rate);
         if (d.text && d.value > 0) li.discount = d.text;
       }
-      if (S.locations.length) li.location_id = String($('location').value);
-      var tags = [];
+      if (S.locations.length) li.location_id = String(r.loc || $('location').value);
+      if (r.pb) li.pricebook_id = String(r.pb.pricebook_id);
+var tags = [];
       Object.keys(r.tags).forEach(function (tid) {
         if (r.tags[tid]) tags.push({ tag_id: String(tid), tag_option_id: String(r.tags[tid]) });
       });
@@ -2909,6 +4844,9 @@ function cfDefByLabel(label) {
       jobs.push(api('GET', '/items/' + id).then(function (j) {
         if (!j.item || (j.item.status && j.item.status !== 'active')) {
           throw mkErr('data', 'Item "' + ids[id] + '" is no longer active.');
+        }
+        if (detectGst() && !String(j.item.hsn_or_sac || '').trim()) {
+          throw mkErr('data', 'Item "' + ids[id] + '" has no HSN/SAC code in Zoho Books. Add it before saving.');
         }
       }));
     });
@@ -3066,16 +5004,75 @@ function cfDefByLabel(label) {
     if (selectedVal !== undefined) sel.value = selectedVal;
   }
 
+  // function buildReferenceUI() {
+  //   if ($('placeOfSupply')) {
+  //     var states = typeof STATES_IN !== 'undefined' ? STATES_IN : [];
+  //     fillOptions($('placeOfSupply'), states.map(function (s) { return [s[0], '[' + s[0] + '] - ' + s[1]]; }), 'Select a state');
+  //   }
+  //   if (S.salespersons.length) {
+  //     $('spWrap').hidden = false;
+  //     fillSelect($('salesperson'), S.salespersons, 'salesperson_id', 'salesperson_name', '— none —', '');
+  //   }
+
+  //   if (S.locations.length) {
+  //     $('locWrap').hidden = false;
+  //     var primary = S.locations.filter(function (l) { return l.is_primary; })[0] || S.locations[0];
+  //     fillSelect($('location'), soLocList(), 'location_id', 'location_name', null, String(primary.location_id));
+  //   }
+
+  //   if (S.pricebooks.length) {
+  //     $('plWrap').hidden = false;
+  //     fillSelect($('priceList'), S.pricebooks.map(function (p) {
+  //       var t = p.pricebook_type === 'fixed_percentage' && p.percentage != null
+  //         ? ' [' + p.percentage + '% ' + (p.is_increase ? 'Markup' : 'Markdown') + ']' : '';
+  //       return { pricebook_id: p.pricebook_id, name: p.name + t };
+  //     }), 'pricebook_id', 'name', 'Select Price List', '');
+  //   }
+
+  //   buildCustomFields();
+  //   NAMED_CF.forEach(function (n) {
+  //     var def = cfDefByLabel(n.label);
+  //     if (!def && CONFIG.debug) console.warn('[SOWidget] No custom field named "' + n.label + '" found in this Zoho Books org.');
+  //   });
+  //   setCurrency(S.baseCurrency);
+  //   soFillTerms('');
+  //   ['location', 'payTerms', 'salesperson', 'priceList'].forEach(function (id) {
+  //     lookupEnhance($(id), id === 'payTerms'
+  //       ? { newLabel: 'New Payment Term', onNew: function () { openPaymentTermModal('so'); } }
+  //       : null);
+  //   });
+
+  //   var prevLoc = $('location').value;
+  //   $('location').addEventListener('change', function () {
+  //     var v = $('location').value;
+  //     updateSourceHint();
+  //     if (v === prevLoc) return;
+  //     if (!S.rows.some(function (r) { return r.loc !== v; })) { prevLoc = v; return; }
+  //     askConfirm('Apply this warehouse to all item rows?').then(function (ok) {
+  //       if (ok) { prevLoc = v; S.rows.forEach(function (r) { setRowLoc(r, v); }); }
+  //       else { $('location').value = prevLoc; updateSourceHint(); }
+  //     });
+  //   });
+  //   updateSourceHint(); 
+  //   lookupEnhance($('tdsTax'), { newLabel: 'New TDS Tax', onNew: openTaxModal });
+  //   txFill('');// fill on initial load
+  // }
   function buildReferenceUI() {
+    if ($('placeOfSupply')) {
+      var states = typeof STATES_IN !== 'undefined' ? STATES_IN : [];
+      fillOptions($('placeOfSupply'), states.map(function (s) { return [s[0], '[' + s[0] + '] - ' + s[1]]; }), 'Select a state');
+    }
     if (S.salespersons.length) {
       $('spWrap').hidden = false;
       fillSelect($('salesperson'), S.salespersons, 'salesperson_id', 'salesperson_name', '— none —', '');
     }
 
     if (S.locations.length) {
-      $('locWrap').hidden = false;
       var primary = S.locations.filter(function (l) { return l.is_primary; })[0] || S.locations[0];
+      $('locWrap').hidden = false;
+      $('warehouseWrap').hidden = false;
       fillSelect($('location'), soLocList(), 'location_id', 'location_name', null, String(primary.location_id));
+      fillWarehouses();
     }
 
     if (S.pricebooks.length) {
@@ -3094,21 +5091,40 @@ function cfDefByLabel(label) {
     });
     setCurrency(S.baseCurrency);
     soFillTerms('');
-    ['location', 'payTerms', 'salesperson', 'priceList'].forEach(function (id) {
+    
+    // Enhance both dropdowns for the searchable UI
+    ['location', 'itemLocation', 'payTerms', 'salesperson', 'priceList'].forEach(function (id) {
       lookupEnhance($(id), id === 'payTerms'
         ? { newLabel: 'New Payment Term', onNew: function () { openPaymentTermModal('so'); } }
         : null);
     });
 
-    // $('location').addEventListener('change', function () {
-    //   var loc = S.locations.filter(function (l) { return String(l.location_id) === $('location').value; })[0];
-    //   var h = $('sourceHint');
-    //   if (h) h.textContent = loc && (loc.state || loc.state_code) ? 'Source of Supply: ' + (loc.state || loc.state_code) : '';
-    // });
-    $('location').addEventListener('change', updateSourceHint);
-    updateSourceHint();   // fill on initial load
-  }
+    $('location').addEventListener('change', fillWarehouses);   // parent changed → reload its child warehouses
 
+    S.prevWh = $('itemLocation').value;
+    $('itemLocation').addEventListener('change', function () {
+      var v = $('itemLocation').value;
+      if (v === S.prevWh) return;
+      if (!S.rows.some(function (r) { return r.loc !== v; })) { S.prevWh = v; return; }
+      askConfirm('Apply this warehouse location to all item rows?').then(function (ok) {
+        if (ok) { S.prevWh = v; S.rows.forEach(function (r) { setRowLoc(r, v); }); }
+        else { $('itemLocation').value = S.prevWh; }
+      });
+    });
+
+    // Changing the top Location updates the Source of Supply hint and the item-table warehouse
+$('location').addEventListener('change', function () {
+  updateSourceHint();
+  var v = $('location').value;
+  if ($('itemLocation').value !== v) {
+    $('itemLocation').value = v;
+    $('itemLocation').dispatchEvent(new Event('change', { bubbles: true }));   // reuses your "apply to all rows?" confirm
+  }
+});
+updateSourceHint();
+    lookupEnhance($('tdsTax'), { newLabel: 'New TDS Tax', onNew: openTaxModal });
+    txFill('');// fill on initial load
+  }
   /* ================= INIT ================= */
   function resizeModal() {
     var MAX_W = 1280, MAX_H = 940, MIN_W = 760, MIN_H = 640;
@@ -3194,8 +5210,8 @@ function cfDefByLabel(label) {
       }
       buildReferenceUI();
       initCustomerCache();   // IndexedDB first, Zoho Books API only when nothing is stored
-      Promise.resolve(loadNcRefs()).then(function () { soFillTerms(); });
-      if (!S.rows.length) addRow();
+      Promise.resolve(loadNcRefs()).then(function () { soFillTerms(); refreshTaxSelects(); });
+            if (!S.rows.length) addRow();
       recalc();
       if (loading) loading.hidden = true;
       if (app) app.hidden = false;
@@ -3218,6 +5234,7 @@ function cfDefByLabel(label) {
 
     $('soDate').value = todayISO();
     buildAddressFields();
+    ciInit();
 
     wireCustomerPicker();
     $('body').addEventListener('scroll', function () { if (!comboEl.hidden) hideCombo(); });
@@ -3232,23 +5249,33 @@ function cfDefByLabel(label) {
     $('inclusive').addEventListener('change', recalc);
 
     $('location').addEventListener('change', function () { checkField('location'); });
+    $('tdsTax').addEventListener('mousedown', function () {
+      loadTaxes().then(function () { var id = $('tdsTax').value; txFill(id); });
+    });
 
     $('priceList').addEventListener('change', function () {
-      S.touched.priceList = true;
-      S.pricebook = S.pricebooks.filter(function (p) { return String(p.pricebook_id) === $('priceList').value; })[0] || null;
-      var kept = 0;
-      S.rows.forEach(function (r) {
-        if (r.rateTouched && r.item) kept++;
-        else refreshRate(r);
-      });
-      $('rowNotice').textContent = kept ? kept + ' row(s) keep the rate you entered manually.' : '';
-      recalc();
+      var id = $('priceList').value, prevId = S.pricebook ? String(S.pricebook.pricebook_id) : '';
+      if (id === prevId) return;
+      var pb = S.pricebooks.filter(function (p) { return String(p.pricebook_id) === id; })[0] || null;
+      function apply() {
+        S.touched.priceList = true;
+        S.pricebook = pb;
+        S.rows.forEach(function (r) {
+          setRowPb(r, pb);
+          if (r.item) { r.rateTouched = false; refreshRate(r, true); }
+        });
+        $('rowNotice').textContent = '';
+        recalc();
+      }
+      if (!S.rows.some(function (r) { return r.item; })) { apply(); return; }
+      askConfirm('Apply this price list to all items? Item rates will be replaced (discounts are not changed).')
+        .then(function (ok) { if (ok) apply(); else $('priceList').value = prevId; });
     });
 
     $('discLevel').addEventListener('change', function () {
       var entity = $('discLevel').value === 'entity_level';
       $('entityDiscRow').hidden = !entity;
-      Array.prototype.forEach.call(document.querySelectorAll('.item-row .c-disc input'), function (i) { i.disabled = entity; });
+      Array.prototype.forEach.call(document.querySelectorAll('.item-row .c-disc input, .item-row .c-disc select'), function (i) { i.disabled = entity; });
       $('thDisc').textContent = entity ? '' : 'Discount';
       recalc();
     });
@@ -3257,6 +5284,7 @@ function cfDefByLabel(label) {
       var r = addRow();
       r.refs.item.focus();
     });
+    $('btnBulk').addEventListener('click', openBulk);
     $('btnSubmit').addEventListener('click', submit);
     $('soForm').addEventListener('submit', function (e) { e.preventDefault(); });
     $('btnCancel').addEventListener('click', function () { closeWidget(); });
@@ -3280,6 +5308,16 @@ function cfDefByLabel(label) {
         saveNewCustomer();
       }
     });
+    $('hsnSave').addEventListener('click', hsnSave);
+$('hsnCancel').addEventListener('click', function () { $('hsnModal').hidden = true; });
+$('hsnClose').addEventListener('click', function () { $('hsnModal').hidden = true; });
+$('tagSave').addEventListener('click', tagSave);
+$('tagCancel').addEventListener('click', function () { $('tagModal').hidden = true; });
+$('tagClose').addEventListener('click', function () { $('tagModal').hidden = true; });
+Array.prototype.forEach.call(document.querySelectorAll('input[name="tds_tcs"]'), function (r) {
+  r.addEventListener('change', function () { txFill(''); recalc(); });
+});
+$('tdsTax').addEventListener('change', recalc);
   }
 
   window.SOWidget = { computeTotals: computeTotals, parseDiscount: parseDiscount, priceListRate: priceListRate };
