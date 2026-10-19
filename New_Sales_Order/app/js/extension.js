@@ -45,6 +45,29 @@ console.log('%c[SOWidget] file loaded', 'color:#1d8a4e;font-weight:bold');
     ['attention', 'Attention'], ['address', 'Street 1'], ['street2', 'Street 2'],
     ['city', 'City'], ['state', 'State'], ['zip', 'ZIP / PIN code'], ['country', 'Country']
   ];
+  /* Names of the "special" custom fields shown inline in Order Details.
+   They are matched by their Zoho Books custom-field label and sent via custom_fields[]. */
+var NAMED_CF = [
+  { slot: 'saleName',     label: 'Sale Name' },
+  { slot: 'saleCode',     label: 'Sale Code' },
+  { slot: 'salePhone',    label: 'Sale Phone' },
+  { slot: 'taskOrder',    label: 'Task Order' },
+  { slot: 'clientPO',     label: 'Client PO Number' },
+  { slot: 'contractSig',  label: 'Contract Signature Status' },
+  { slot: 'origDelivery', label: 'Original Client Delivery Date' }
+];
+
+function _normLabel(s) {
+  return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function cfDefByLabel(label) {
+  var L = _normLabel(label);
+  for (var i = 0; i < S.cfDefs.length; i++) {
+    if (_normLabel(S.cfDefs[i].label) === L) return S.cfDefs[i];
+  }
+  return null;
+}
 
   /* ================= SMALL HELPERS ================= */
   function $(id) { return document.getElementById(id); }
@@ -549,6 +572,17 @@ console.log('%c[SOWidget] file loaded', 'color:#1d8a4e;font-weight:bold');
     return m;
   }
 
+  function updateSourceHint() {
+    var h = $('sourceHint');
+    if (!h) return;
+    var sel = $('location');
+    if (!sel) return;
+    var loc = S.locations.filter(function (l) { return String(l.location_id) === sel.value; })[0];
+    h.textContent = (loc && (loc.state || loc.state_code))
+      ? 'Source of Supply: ' + (loc.state || loc.state_code)
+      : '';
+  }
+
   /* ================= ITEM ROWS ================= */
   function taxOptions(sel, selected) {
     sel.innerHTML = '';
@@ -569,28 +603,61 @@ console.log('%c[SOWidget] file loaded', 'color:#1d8a4e;font-weight:bold');
     var tb = mk('tbody', { class: 'row' });
     var tr = mk('tr', { class: 'item-row' }, tb);
     var R = row.refs;
-    R.n = mk('td', { class: 'c-n' }, tr);
-
+  
+    /* 1. Drag handle (holds hidden row number) */
+    var tdDrag = mk('td', { class: 'c-drag' }, tr);
+    R.n = mk('span', { class: 'row-n', text: '' }, tdDrag);
+  
+    /* 2. Image placeholder */
+    var tdImg = mk('td', { class: 'c-img' }, tr);
+    mk('span', { class: 'item-img' }, tdImg);
+  
+    /* 3. Item details */
     var tdI = mk('td', { class: 'c-item' }, tr);
-    R.item = mk('input', { type: 'text', placeholder: 'Type or click to select an item', autocomplete: 'off' }, tdI);
+    R.item = mk('input', {
+      type: 'text', placeholder: 'Type or click to select an item.',
+      autocomplete: 'off', class: 'item-inp'
+    }, tdI);
     R.desc = mk('textarea', { placeholder: 'Description (optional)', rows: 1 }, tdI);
     R.err = mk('div', { class: 'row-err' }, tdI);
-
+  
+    /* 4. Brand chip (Sub-brand removed from UI, stub kept hidden) */
     var tdB = mk('td', { class: 'c-brand' }, tr);
-    R.brand = mk('span', { class: 'ro', text: '—' }, tdB);
-    var tdS = mk('td', { class: 'c-brand' }, tr);
-    R.sub = mk('span', { class: 'ro', text: '—' }, tdS);
-
-    R.qty = mk('input', { type: 'text', inputMode: 'decimal', value: '1' }, mk('td', { class: 'c-num' }, tr));
-    R.rate = mk('input', { type: 'text', inputMode: 'decimal', placeholder: '0.00' }, mk('td', { class: 'c-num' }, tr));
-    R.disc = mk('input', { type: 'text', inputMode: 'decimal', placeholder: '0 or 0%' }, mk('td', { class: 'c-disc' }, tr));
-    R.disc.disabled = $('discLevel').value === 'entity_level';
-    R.tax = mk('select', {}, mk('td', { class: 'c-tax' }, tr));
+    var chipB = mk('div', { class: 'chip', 'data-empty': '1' }, tdB);
+    R.brand = mk('span', { class: 'chip-t' }, chipB);
+    mk('button', { type: 'button', class: 'chip-x', tabindex: '-1', innerHTML: '&times;' }, chipB);
+    mk('span', { class: 'chip-chev' }, tdB);
+    R.sub = mk('span', { hidden: true });   // stub – no longer in table
+  
+    /* 5. Quantity */
+    var tdQ = mk('td', { class: 'c-num' }, tr);
+    R.qty = mk('input', { type: 'text', inputMode: 'decimal', value: '1', class: 'cell-inp' }, tdQ);
+  
+    /* 6. Rate */
+    var tdR = mk('td', { class: 'c-num' }, tr);
+    R.rate = mk('input', { type: 'text', inputMode: 'decimal', placeholder: '0.00', class: 'cell-inp' }, tdR);
+  
+    /* 7. Discount (input + % suffix) */
+    var tdD = mk('td', { class: 'c-disc' }, tr);
+    var discW = mk('div', { class: 'disc-w' }, tdD);
+    R.disc = mk('input', { type: 'text', inputMode: 'decimal', placeholder: '0', class: 'disc-inp' }, discW);
+    var pct = mk('span', { class: 'disc-pct', title: 'Amount or percentage' }, discW);
+    mk('span', { class: 'pct-t', text: '%' }, pct);
+    mk('span', { class: 'pct-c', text: '▾' }, pct);
+  
+    /* 8. Tax select */
+    var tdT = mk('td', { class: 'c-tax' }, tr);
+    R.tax = mk('select', { class: 'cell-sel' }, tdT);
     taxOptions(R.tax, '');
+  
+    /* 9. Amount */
     R.amt = mk('td', { class: 'c-amt', text: money(0) }, tr);
+  
+    /* 10. Delete */
     var tdX = mk('td', { class: 'c-x' }, tr);
-    R.del = mk('button', { type: 'button', class: 'icon-btn', title: 'Remove row', innerHTML: '&times;' }, tdX);
-
+    R.del = mk('button', { type: 'button', class: 'row-del', title: 'Remove row', innerHTML: '&times;' }, tdX);
+  
+    /* Reporting tags subrow — colspan now 10 */
     if (S.tags.length) {
       var sr = mk('tr', { class: 'subrow' }, tb);
       var sc = mk('td', { colSpan: 10 }, sr);
@@ -605,12 +672,12 @@ console.log('%c[SOWidget] file loaded', 'color:#1d8a4e;font-weight:bold');
         sel.addEventListener('change', function () { row.tags[t.tag_id] = sel.value; });
       });
     }
-
+  
     row.el = tb;
     S.rows.push(row);
     $('items').appendChild(tb);
     renumber();
-
+  
     attachCombo(R.item, {
       fetch: function (q) {
         return api('GET', '/items', { search_text: q, filter_by: 'Status.Active', per_page: CONFIG.searchPageSize })
@@ -627,13 +694,13 @@ console.log('%c[SOWidget] file loaded', 'color:#1d8a4e;font-weight:bold');
       onEdit: function () {
         if (row.item) {
           row.item = null;
-          R.brand.textContent = '—';
-          R.sub.textContent = '—';
+          R.brand.textContent = '';
+          R.brand.parentNode.dataset.empty = '1';
         }
       },
       onSelect: function (it) { selectItem(row, it); }
     });
-
+  
     R.qty.addEventListener('input', function () { refreshRate(row); onRowChange(row); });
     R.rate.addEventListener('input', function () { row.rateTouched = true; onRowChange(row); });
     R.disc.addEventListener('input', function () { onRowChange(row); });
@@ -645,7 +712,6 @@ console.log('%c[SOWidget] file loaded', 'color:#1d8a4e;font-weight:bold');
     R.del.addEventListener('click', function () { removeRow(row); });
     return row;
   }
-
   function renumber() {
     S.rows.forEach(function (r, i) { r.refs.n.textContent = String(i + 1); });
     S.rows.forEach(function (r) { r.refs.del.disabled = S.rows.length === 1; });
@@ -673,14 +739,13 @@ console.log('%c[SOWidget] file loaded', 'color:#1d8a4e;font-weight:bold');
       if (!R.desc.value.trim()) R.desc.value = item.description || '';
 
       var brand = item.brand || '';
-      var subBrand = '';
       (item.custom_fields || []).forEach(function (cf) {
         var label = String(cf.label || cf.placeholder || '').toLowerCase();
-        if (/sub[\s_-]*brand/.test(label)) subBrand = cf.value || '';
-        else if (!brand && /brand/.test(label)) brand = cf.value || '';
+        if (!brand && /^brand$|^item[\s_-]*brand/.test(label)) brand = cf.value || '';
       });
-      R.brand.textContent = brand || '—';
-      R.sub.textContent = subBrand || '—';
+      R.brand.textContent = brand || '';
+      R.brand.parentNode.dataset.empty = brand ? '0' : '1';
+
 
       var taxId = item.tax_id != null ? String(item.tax_id) : '';
       if (taxId && !S.taxMap[taxId]) {
@@ -2260,20 +2325,18 @@ console.log('%c[SOWidget] file loaded', 'color:#1d8a4e;font-weight:bold');
   }
 
   // Child warehouses are listed under their parent, if the API returns parent_location_id.
+  // Zoho native look: primary location has no bullet, all others are prefixed
+  // with "• " and suffixed with " (Warehouse)".
   function soLocList() {
-    var ids = {}, out = [];
-    S.locations.forEach(function (l) { ids[l.location_id] = 1; });
-    var roots = S.locations.filter(function (l) { return !l.parent_location_id || !ids[l.parent_location_id]; });
-    if (roots.length === S.locations.length) return S.locations;
-    roots.forEach(function (r) {
-      out.push(r);
-      S.locations.forEach(function (c) {
-        if (c.parent_location_id && String(c.parent_location_id) === String(r.location_id)) {
-          out.push(Object.assign({}, c, { location_name: '• ' + c.location_name }));
-        }
-      });
+    return S.locations.map(function (l) {
+      var primary = !!l.is_primary; 
+      return {
+        location_id: l.location_id,
+        location_name: (primary ? '' : '\u2022 ') + l.location_name + (primary ? '' : ' (Warehouse)'),
+        is_primary: primary,
+        parent_location_id: l.parent_location_id
+      };
     });
-    return out;
   }
 
   /* ================= NEW ITEM MODAL ================= */
@@ -2754,14 +2817,31 @@ console.log('%c[SOWidget] file loaded', 'color:#1d8a4e;font-weight:bold');
     if ($('terms').value.trim()) p.terms = $('terms').value.trim();
 
     var cfs = [];
+
+    // "Additional Fields" card — excludes the named inline fields
     S.cfDefs.forEach(function (d) {
+      if (NAMED_CF.some(function (n) { return _normLabel(n.label) === _normLabel(d.label); })) return;
       var el = $('cf_' + d.customfield_id);
       if (!el) return;
       var val = el.type === 'checkbox' ? (el.checked ? 'true' : '') : el.value.trim();
       if (val !== '') cfs.push({ customfield_id: String(d.customfield_id), value: val });
     });
-    if (cfs.length) p.custom_fields = cfs;
 
+    // Named custom fields shown inline in Order Details
+    NAMED_CF.forEach(function (n) {
+      var el = $(n.slot);
+      if (!el) return;
+      var val = String(el.value || '').trim();
+      if (val === '') return;
+      var def = cfDefByLabel(n.label);
+      if (!def) {
+        if (CONFIG.debug) console.warn('[SOWidget] named custom field has no matching definition in Zoho:', n.label);
+        return;
+      }
+      cfs.push({ customfield_id: String(def.customfield_id), value: val });
+    });
+
+    if (cfs.length) p.custom_fields = cfs;
     if (S.addrDirty.b) { var b = addrPayload('b'); if (b) p.billing_address = b; }
     if (S.addrDirty.s) { var s = addrPayload('s'); if (s) p.shipping_address = s; }
 
@@ -2957,8 +3037,16 @@ console.log('%c[SOWidget] file loaded', 'color:#1d8a4e;font-weight:bold');
     var grid = $('cfGrid');
     if (!grid) return;
     grid.innerHTML = '';
-    $('cfCard').hidden = !S.cfDefs.length;
-    S.cfDefs.forEach(function (d) {
+  
+    // Exclude the named custom fields (they render inside Order Details)
+    var skip = {};
+    NAMED_CF.forEach(function (n) { skip[_normLabel(n.label)] = 1; });
+    var remaining = S.cfDefs.filter(function (d) {
+      return !skip[_normLabel(d.label)];
+    });
+  
+    $('cfCard').hidden = !remaining.length;
+    remaining.forEach(function (d) {
       var f = mk('div', { class: 'field' }, grid);
       var type = String(d.data_type || '').toLowerCase();
       var lab = mk('label', { htmlFor: 'cf_' + d.customfield_id, text: d.label || ('Custom field ' + d.customfield_id) }, f);
@@ -3000,6 +3088,10 @@ console.log('%c[SOWidget] file loaded', 'color:#1d8a4e;font-weight:bold');
     }
 
     buildCustomFields();
+    NAMED_CF.forEach(function (n) {
+      var def = cfDefByLabel(n.label);
+      if (!def && CONFIG.debug) console.warn('[SOWidget] No custom field named "' + n.label + '" found in this Zoho Books org.');
+    });
     setCurrency(S.baseCurrency);
     soFillTerms('');
     ['location', 'payTerms', 'salesperson', 'priceList'].forEach(function (id) {
@@ -3007,6 +3099,14 @@ console.log('%c[SOWidget] file loaded', 'color:#1d8a4e;font-weight:bold');
         ? { newLabel: 'New Payment Term', onNew: function () { openPaymentTermModal('so'); } }
         : null);
     });
+
+    // $('location').addEventListener('change', function () {
+    //   var loc = S.locations.filter(function (l) { return String(l.location_id) === $('location').value; })[0];
+    //   var h = $('sourceHint');
+    //   if (h) h.textContent = loc && (loc.state || loc.state_code) ? 'Source of Supply: ' + (loc.state || loc.state_code) : '';
+    // });
+    $('location').addEventListener('change', updateSourceHint);
+    updateSourceHint();   // fill on initial load
   }
 
   /* ================= INIT ================= */

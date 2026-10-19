@@ -1,521 +1,629 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>New Sales Order</title>
-  <script src="https://static.zohocdn.com/zohofinance/v1.0/zf_sdk.js"></script>
-  <link rel="stylesheet" href="style.css">
-</head>
-<body>
+  <!DOCTYPE html>
+  <html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>New Sales Order</title>
+    <script src="https://static.zohocdn.com/zohofinance/v1.0/zf_sdk.js"></script>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
 
-  <!-- Loading / fatal error -->
-  <div id="loading" class="center-panel">
-    <div class="spinner" aria-hidden="true"></div>
-    <p id="loadingText">Loading Zoho Books data…</p>
-    <button type="button" id="btnRetry" class="btn" hidden>Retry</button>
-  </div>
+    <!-- Loading / fatal error -->
+    <div id="loading" class="center-panel">
+      <div class="spinner" aria-hidden="true"></div>
+      <p id="loadingText">Loading Zoho Books data…</p>
+      <button type="button" id="btnRetry" class="btn" hidden>Retry</button>
+    </div>
 
-  <!-- Main form: sticky header + scrollable body + sticky footer -->
-  <div id="app" hidden>
-    <header class="top">
-      <h1>New Sales Order</h1>
-      <button type="button" id="btnCancel" class="btn ghost">Cancel</button>
-    </header>
+    <!-- Main form -->
+    <div id="app" hidden>
+      <header class="top">
+        <h1>New Sales Order</h1>
+      </header>
 
-    <div id="body">
-      <div id="banner" class="banner" role="alert" hidden></div>
+      <div id="body">
+        <div id="banner" class="banner" role="alert" hidden></div>
 
-      <div id="uncertain" class="banner warn" hidden>
-        <strong>The server did not confirm whether the order was created.</strong>
-        <p>Submit is locked so the order is not created twice. Check Zoho Books for this customer's recent orders before doing anything else.</p>
-        <div class="row-actions">
-          <button type="button" id="btnCheck" class="btn">Check recent orders</button>
-          <button type="button" id="btnUnlock" class="btn ghost">It was not created – unlock form</button>
+        <div id="uncertain" class="banner warn" hidden>
+          <strong>The server did not confirm whether the order was created.</strong>
+          <p>Submit is locked so the order is not created twice. Check Zoho Books for this customer's recent orders before doing anything else.</p>
+          <div class="row-actions">
+            <button type="button" id="btnCheck" class="btn">Check recent orders</button>
+            <button type="button" id="btnUnlock" class="btn ghost">It was not created – unlock form</button>
+          </div>
+          <div id="recent"></div>
         </div>
-        <div id="recent"></div>
+
+        <form id="soForm" novalidate autocomplete="off">
+
+          <!-- ========== Order details ========== -->
+          <!-- ========== Order details ========== -->
+          <section class="so-card">
+            <div class="so-row">
+              <label class="so-label" for="customer">Customer Name<span class="req">*</span></label>
+              <div class="so-field">
+                <div class="cust-wrap" id="custWrap">
+                  <div class="cust-select" id="custSelect">
+                    <input type="text" id="customer" readonly placeholder="Select or add a customer" autocomplete="off">
+                    <button type="button" id="customerClear" class="cust-x" title="Clear customer" hidden>&times;</button>
+                    <span class="cust-chev" id="custChev" aria-hidden="true"></span>
+                  </div>
+                  <button type="button" id="custGo" class="cust-go" title="Search customers" aria-label="Search customers">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+                  </button>
+                  <div class="cust-panel" id="custPanel" hidden>
+                    <div class="cust-search">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8a94a6" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+                      <input type="text" id="custSearch" placeholder="Search" autocomplete="off">
+                    </div>
+                    <div class="cust-list" id="custList" role="listbox"></div>
+                    <div class="cust-foot">
+                      <button type="button" id="custNew" class="combo-new-btn"><span class="plus">+</span><span>New Customer</span></button>
+                      <button type="button" id="custRefresh" class="cust-refresh" title="Reload customers from Zoho Books">&#8635; Refresh</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="hint" id="customerHint"></div>
+              </div>
+            </div>
+          
+            <div class="so-row" id="locWrap" hidden>
+              <label class="so-label" for="location">Location</label>
+              <div class="so-field">
+                <select id="location" class="w-sm"></select>
+                <div class="hint" id="sourceHint"></div>
+              </div>
+            </div>
+          
+            <div class="so-divider"></div>
+          
+            <div class="so-row">
+              <label class="so-label" for="soNumber">Sales Order#<span class="req">*</span></label>
+              <div class="so-field">
+                <div class="input-suffix w-sm">
+                  <input type="text" id="soNumber" placeholder="Auto-generated">
+                  <button type="button" class="suffix-btn" title="Sales order preferences" tabindex="-1">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#2a62d6" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.9 19a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 5 8.9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9.5a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 15 5a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+                  </button>
+                </div>
+                <div class="hint">Leave blank to use Zoho Books auto-numbering.</div>
+              </div>
+            </div>
+          
+            <div class="so-row">
+              <label class="so-label" for="refNumber">Reference#&nbsp;<span class="info-dot" title="A reference number for this order, e.g. customer's PO">i</span></label>
+              <div class="so-field">
+                <input type="text" id="refNumber" maxlength="100" class="w-sm">
+              </div>
+            </div>
+          
+            <div class="so-row">
+              <label class="so-label" for="soDate">Sales Order Date<span class="req">*</span></label>
+              <div class="so-field">
+                <input type="date" id="soDate" class="w-sm">
+              </div>
+            </div>
+          
+            <div class="so-row">
+              <label class="so-label" for="shipDate">Expected Shipment Date</label>
+              <div class="so-field">
+                <input type="date" id="shipDate" class="w-sm">
+              </div>
+            </div>
+          
+            <div class="so-row">
+              <label class="so-label" for="payTerms">Payment Terms</label>
+              <div class="so-field">
+                <select id="payTerms" class="w-sm"></select>
+              </div>
+            </div>
+          
+            <div class="so-divider"></div>
+          
+            <div class="so-row">
+              <label class="so-label" for="delivery">Delivery Method</label>
+              <div class="so-field">
+                <input type="text" id="delivery" maxlength="100" class="w-sm">
+              </div>
+            </div>
+          
+            <div class="so-row" id="spWrap" hidden>
+              <label class="so-label" for="salesperson">Salesperson</label>
+              <div class="so-field">
+                <select id="salesperson" class="w-sm"></select>
+              </div>
+            </div>
+          
+            <!-- ===== Two-column pair grid: Sale Name / Sale Code, Sale Phone / Task Order, etc. ===== -->
+            <div class="so-pairs">
+          
+              <label class="so-label" for="saleName">Sale Name</label>
+              <div class="so-field">
+                <input type="text" id="saleName" maxlength="200" autocomplete="off">
+              </div>
+          
+              <label class="so-label" for="saleCode">Sale Code</label>
+              <div class="so-field">
+                <input type="text" id="saleCode" maxlength="200" autocomplete="off">
+              </div>
+          
+              <label class="so-label" for="salePhone">Sale Phone</label>
+              <div class="so-field">
+                <div class="with-icon">
+                  <span class="field-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#8a94a6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.3 1.8.6 2.6a2 2 0 0 1-.4 2.1L8 9.7a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.8.3 1.7.5 2.6.6a2 2 0 0 1 1.7 2Z"/>
+                    </svg>
+                  </span>
+                  <input type="text" id="salePhone" inputmode="tel" autocomplete="off">
+                </div>
+              </div>
+          
+              <label class="so-label" for="taskOrder">Task Order</label>
+              <div class="so-field">
+                <input type="text" id="taskOrder" maxlength="200" autocomplete="off">
+              </div>
+          
+              <label class="so-label" for="clientPO">Client PO Number</label>
+              <div class="so-field">
+                <input type="text" id="clientPO" maxlength="200" autocomplete="off">
+              </div>
+          
+              <label class="so-label" for="contractSig">Contract Signature Status</label>
+              <div class="so-field">
+                <select id="contractSig">
+                  <option value=""></option>
+                  <option value="Pending">Pending</option>
+                  <option value="Sent">Sent</option>
+                  <option value="Signed">Signed</option>
+                  <option value="Declined">Declined</option>
+                </select>
+              </div>
+          
+              <label class="so-label" for="origDelivery">Original Client Delivery Date</label>
+              <div class="so-field">
+                <input type="date" id="origDelivery">
+              </div>
+          
+              <!-- empty right-column cell to keep grid alignment -->
+              <span></span><span></span>
+            </div>
+          
+            <div class="so-row" id="exchWrap" hidden>
+              <label class="so-label" for="exchRate">Exchange Rate<span class="req">*</span></label>
+              <div class="so-field">
+                <input type="text" id="exchRate" inputmode="decimal" class="w-sm">
+                <div class="hint">Currency: <span id="currencyText"></span></div>
+              </div>
+            </div>
+          
+            <div class="so-row" id="currencyRow">
+              <label class="so-label">Currency</label>
+              <div class="so-field">
+                <input type="text" id="currencyTextDisplay" readonly class="w-sm" tabindex="-1">
+                <div class="hint">Follows the selected customer.</div>
+              </div>
+            </div>
+          </section>
+          <!-- ========== Custom fields (Additional Fields) ========== -->
+          <section class="so-card" id="cfCard" hidden>
+            <h2 class="so-card-title">Additional Fields</h2>
+            <div class="cf-grid" id="cfGrid"></div>
+          </section>
+
+          <!-- ========== Items ========== -->
+          <!-- ========== Items ========== -->
+          <!-- ========== Items ========== -->
+          <section class="so-card items-card">
+          
+            <!-- Toolbar: Warehouse Location | Price List (same row) -->
+            <div class="items-toolbar">
+              <div class="tb-field" id="locWrap" hidden>
+                <span class="tb-lbl">Warehouse Location</span>
+                <select id="location"></select>
+              </div>
+          
+              <div class="tb-field" id="plWrap" hidden>
+                <span class="tb-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+                      stroke="#6b7280" stroke-width="1.6">
+                    <rect x="3.5" y="5" width="17" height="15" rx="2"/>
+                    <path d="M3.5 9.5h17M8 3v4M16 3v4"/>
+                  </svg>
+                </span>
+                <select id="priceList"></select>
+              </div>
+            </div>
+          
+            <!-- Hidden inputs — keep functionality working while removed from UI -->
+            <div hidden aria-hidden="true">
+              <input type="checkbox" id="inclusive">
+              <select id="discLevel">
+                <option value="item_level" selected>At line item level</option>
+                <option value="entity_level">At transaction level</option>
+              </select>
+            </div>
+          
+            <!-- Table header row: title + Bulk Actions -->
+            <div class="items-head">
+              <span class="items-title">Item Table</span>
+              <a href="#" class="bulk-link" tabindex="-1" onclick="return false;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                  <circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-6"/>
+                </svg>
+                Bulk Actions
+              </a>
+            </div>
+          
+            <div class="table-wrap">
+              <table class="items" id="items">
+                <thead>
+                  <tr>
+                    <th class="c-drag"></th>
+                    <th class="c-img"></th>
+                    <th class="c-item">Item Details</th>
+                    <th class="c-brand">Brand</th>
+                    <th class="c-num">Quantity</th>
+                    <th class="c-num">Rate <span class="info-dot" title="Unit rate">i</span></th>
+                    <th class="c-disc">Discount</th>
+                    <th class="c-tax">Tax <span class="info-dot" title="Tax">i</span></th>
+                    <th class="c-amt">Amount</th>
+                    <th class="c-x"></th>
+                  </tr>
+                </thead>
+                <!-- one <tbody> per item row is added by extension.js -->
+              </table>
+            </div>
+          
+            <div class="items-actions">
+              <button type="button" id="btnAddRow" class="btn-addrow">Add New Row<span class="caret">▾</span></button>
+              <button type="button" class="btn-bulk" tabindex="-1">Add Items in Bulk</button>
+            </div>
+            <div class="hint" id="rowNotice"></div>
+          </section>
+
+          <!-- ========== Notes / terms / attach + totals ========== -->
+          <section class="so-bottom">
+            <div class="so-bottom-left">
+              <div class="field">
+                <label for="notes">Customer Notes</label>
+                <textarea id="notes" rows="3" placeholder="Enter any notes to be displayed in your transaction"></textarea>
+              </div>
+              <div class="field">
+                <label for="terms">Terms &amp; Conditions</label>
+                <textarea id="terms" rows="5"></textarea>
+              </div>
+              <div class="field">
+                <label>Attach File(s) to Sales Order</label>
+                <button type="button" class="btn attach-btn" disabled title="File upload is not available from this widget">⤒ Upload File</button>
+                <div class="hint">Attachments are not supported by this widget. Upload from Zoho Books after saving.</div>
+              </div>
+              <div class="hint addfields-note">Additional Fields: Add custom fields to your sales orders by going to <em>Settings ▸ Sales ▸ Sales Orders ▸ Field Customization</em>.</div>
+            </div>
+
+            <aside class="totals" aria-live="polite">
+              <div class="t-row"><span>Sub Total</span><b id="tSub">0.00</b></div>
+              <div class="t-row" id="tDiscRow" hidden><span>Discount</span><b id="tDisc">0.00</b></div>
+              <div id="tTaxes"></div>
+
+              <div class="t-row tds">
+                <label class="radio"><input type="radio" name="tds_tcs" value="tds" checked> TDS</label>
+                <label class="radio"><input type="radio" name="tds_tcs" value="tcs"> TCS</label>
+                <select disabled tabindex="-1"><option>Select a Tax</option></select>
+                <b class="muted">- 0.00</b>
+              </div>
+
+              <div class="t-row" id="entityDiscRow" hidden>
+                <label for="entityDisc">Discount</label>
+                <input type="text" id="entityDisc" inputmode="decimal" placeholder="0 or 0%">
+                <label class="chk small"><input type="checkbox" id="beforeTax" checked> Before tax</label>
+              </div>
+
+              <div class="t-row">
+                <label for="shipping">Shipping</label>
+                <input type="text" id="shipping" inputmode="decimal" placeholder="0.00">
+              </div>
+              <div class="t-row">
+                <label for="adjustment">Adjustment</label>
+                <input type="text" id="adjustment" inputmode="decimal" placeholder="0.00">
+              </div>
+              <div class="t-row">
+                <label for="adjDesc">Adjustment note</label>
+                <input type="text" id="adjDesc" maxlength="100">
+              </div>
+
+              <div class="t-row grand">
+                <span>Total (<span id="tCur"></span>)</span>
+                <b id="tTotal">0.00</b>
+              </div>
+            </aside>
+          </section>
+
+          <!-- ========== Addresses ========== -->
+          <details class="so-card" id="addrCard">
+            <summary>Billing &amp; shipping address</summary>
+            <div class="two-col addr">
+              <fieldset id="fsBilling"><legend>Billing address</legend></fieldset>
+              <fieldset id="fsShipping"><legend>Shipping address</legend></fieldset>
+            </div>
+            <div class="hint">Filled from the customer. Only addresses you edit here are sent with the order.</div>
+          </details>
+
+          <div id="summary" class="banner" role="alert" hidden></div>
+        </form>
       </div>
 
-      <form id="soForm" novalidate autocomplete="off">
+      <!-- ========== Sticky footer ========== -->
+      <footer class="bar">
+        <div class="bar-left">
+          <button type="button" id="btnSaveDraft" class="btn save-draft">Save as Draft</button>
+          <div class="split-btn">
+            <button type="button" id="btnSubmit" class="btn primary">Save and Submit</button>
+            <button type="button" class="btn primary split-caret" tabindex="-1" aria-label="More save options">▾</button>
+          </div>
+          <button type="button" id="btnCancel" class="btn ghost">Cancel</button>
+        </div>
+        <div class="bar-right">
+          <a href="#" class="inventory-link" tabindex="-1">◎ Inventory Tracking</a>
+          <div class="bar-total">
+            <span>Total Amount: <b id="footTotalAmount">₹ 0.00</b></span>
+            <span>Total Quantity: <b id="footTotalQty">0</b></span>
+          </div>
+        </div>
+        <span id="status" class="status" aria-live="polite"></span>
+      </footer>
+    </div>
 
-        <!-- ========== Order details ========== -->
-        <section class="card">
-          <h2>Order details</h2>
-          <div class="grid">
+    <!-- Success -->
+    <div id="success" class="center-panel" hidden>
+      <div class="tick" aria-hidden="true">&#10003;</div>
+      <h2 id="okTitle">Sales order created</h2>
+      <p id="okDetail"></p>
+      <p class="hint" id="okNote"></p>
+      <button type="button" id="btnClose" class="btn primary">Close</button>
+    </div>
 
-            <div class="field span2 cust-field">
-              <label for="customer">Customer name <span class="req">*</span></label>
-              <div class="cust-wrap" id="custWrap">
-                <div class="cust-select" id="custSelect">
-                  <input type="text" id="customer" readonly placeholder="Select or add a customer" autocomplete="off">
-                  <button type="button" id="customerClear" class="cust-x" title="Clear customer" hidden>&times;</button>
-                  <span class="cust-chev" id="custChev" aria-hidden="true"></span>
+    <!-- Shared dropdown for item lookups -->
+    <div id="combo" class="combo" role="listbox" hidden></div>
+
+    <!-- ========== New Customer modal — unchanged from current markup ========== -->
+    <div id="newCustModal" class="modal-overlay" hidden>
+      <div class="modal-box nc-box" role="dialog" aria-modal="true" aria-labelledby="newCustTitle">
+        <div class="modal-head">
+          <h3 id="newCustTitle">New Customer</h3>
+          <button type="button" class="modal-close" id="newCustClose" aria-label="Close">&times;</button>
+        </div>
+
+        <div class="modal-body nc-body">
+          <div class="nc-row">
+            <label class="nc-l">Customer Type</label>
+            <div class="nc-c"><div class="nc-line">
+              <label class="radio"><input type="radio" name="nc_type" value="business" checked> Business</label>
+              <label class="radio"><input type="radio" name="nc_type" value="individual"> Individual</label>
+            </div></div>
+          </div>
+
+          <div class="nc-row">
+            <label class="nc-l">Primary Contact</label>
+            <div class="nc-c">
+              <div class="nc-line">
+                <select id="nc_salutation" class="w-sal">
+                  <option value="">Salutation</option>
+                  <option value="Mr.">Mr.</option>
+                  <option value="Mrs.">Mrs.</option>
+                  <option value="Ms.">Ms.</option>
+                  <option value="Miss.">Miss.</option>
+                  <option value="Dr.">Dr.</option>
+                </select>
+                <input type="text" id="nc_firstName" placeholder="First Name" class="w-name">
+                <input type="text" id="nc_lastName" placeholder="Last Name" class="w-name">
+              </div>
+              <div class="hint">Last Name is mandatory to sync this contact with Zoho CRM.</div>
+            </div>
+          </div>
+
+          <div class="nc-row">
+            <label class="nc-l" for="nc_companyName">Company Name</label>
+            <div class="nc-c"><input type="text" id="nc_companyName" class="w-main"></div>
+          </div>
+
+          <div class="nc-row">
+            <label class="nc-l req" for="nc_displayName">Display Name*</label>
+            <div class="nc-c">
+              <input type="text" id="nc_displayName" class="w-main" list="ncDisplayList" placeholder="Select or type to add" autocomplete="off">
+              <datalist id="ncDisplayList"></datalist>
+            </div>
+          </div>
+
+          <div class="nc-row">
+            <label class="nc-l" for="nc_email">Email Address</label>
+            <div class="nc-c"><input type="text" id="nc_email" class="w-main" inputmode="email" autocomplete="off"></div>
+          </div>
+
+          <div class="nc-row">
+            <label class="nc-l">Phone</label>
+            <div class="nc-c"><div class="nc-line">
+              <select id="nc_workCode" class="w-code"></select>
+              <input type="text" id="nc_workPhone" placeholder="Work Phone" class="w-ph" inputmode="tel">
+              <select id="nc_mobCode" class="w-code"></select>
+              <input type="text" id="nc_mobile" placeholder="Mobile" class="w-ph" inputmode="tel">
+            </div></div>
+          </div>
+
+          <div class="nc-row">
+            <label class="nc-l" for="nc_language">Customer Language</label>
+            <div class="nc-c"><select id="nc_language" class="w-main"></select></div>
+          </div>
+
+          <div class="nc-tabs" role="tablist">
+            <button type="button" class="nc-tab active" data-pane="other">Other Details</button>
+            <button type="button" class="nc-tab" data-pane="address">Address</button>
+            <button type="button" class="nc-tab" data-pane="cf">Custom Fields</button>
+            <button type="button" class="nc-tab" data-pane="tags">Reporting Tags</button>
+            <button type="button" class="nc-tab" data-pane="remarks">Remarks</button>
+          </div>
+
+          <div class="nc-pane" data-pane="other">
+            <div class="nc-row gst-only">
+              <label class="nc-l req" for="nc_gstTreatmentText">GST Treatment*</label>
+              <div class="nc-c rs-wrap" id="rsGst">
+                <div class="rs-box" id="rsGstBox">
+                  <input type="text" id="nc_gstTreatmentText" readonly placeholder="Select a GST treatment" autocomplete="off">
+                  <span class="cust-chev" aria-hidden="true"></span>
                 </div>
-                <button type="button" id="custGo" class="cust-go" title="Search customers" aria-label="Search customers">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
-                </button>
-
-                <div class="cust-panel" id="custPanel" hidden>
+                <input type="hidden" id="nc_gstTreatment" value="">
+                <div class="rs-panel" id="rsGstPanel" hidden>
                   <div class="cust-search">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8a94a6" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
-                    <input type="text" id="custSearch" placeholder="Search" autocomplete="off">
+                    <input type="text" id="rsGstSearch" placeholder="Search" autocomplete="off">
                   </div>
-                  <div class="cust-list" id="custList" role="listbox"></div>
-                  <div class="cust-foot">
-                    <button type="button" id="custNew" class="combo-new-btn"><span class="plus">+</span><span>New Customer</span></button>
-                    <button type="button" id="custRefresh" class="cust-refresh" title="Reload customers from Zoho Books">&#8635; Refresh</button>
-                  </div>
+                  <div class="rs-list" id="rsGstList" role="listbox"></div>
                 </div>
               </div>
-              <div class="hint" id="customerHint"></div>
             </div>
 
-            <div class="field">
-              <label for="soNumber">Sales order #</label>
-              <input type="text" id="soNumber" placeholder="Auto-generated">
-              <div class="hint">Leave blank to use Zoho Books auto-numbering.</div>
+            <div class="nc-row gst-only gst-reg" id="ncGstinRow" hidden>
+              <label class="nc-l req" for="nc_gstin" id="ncGstinLbl">GSTIN / UIN*</label>
+              <div class="nc-c"><input type="text" id="nc_gstin" class="w-main" maxlength="15" autocomplete="off"></div>
+            </div>
+            <div class="nc-row gst-only gst-reg" id="ncLegalRow" hidden>
+              <label class="nc-l" for="nc_legalName">Business Legal Name</label>
+              <div class="nc-c"><input type="text" id="nc_legalName" class="w-main" maxlength="200"></div>
+            </div>
+            <div class="nc-row gst-only gst-reg" id="ncTradeRow" hidden>
+              <label class="nc-l" for="nc_tradeName">Business Trade Name</label>
+              <div class="nc-c"><input type="text" id="nc_tradeName" class="w-main" maxlength="200"></div>
+            </div>
+            <div class="nc-row gst-only">
+              <label class="nc-l req" for="nc_pos">Place of Supply*</label>
+              <div class="nc-c"><select id="nc_pos" class="w-main"></select></div>
+            </div>
+            <div class="nc-row gst-only">
+              <label class="nc-l" for="nc_pan">PAN</label>
+              <div class="nc-c"><input type="text" id="nc_pan" class="w-main" maxlength="10"></div>
             </div>
 
-            <div class="field">
-              <label for="refNumber">Reference #</label>
-              <input type="text" id="refNumber" maxlength="100">
+            <div class="nc-row">
+              <label class="nc-l req">Tax Preference*</label>
+              <div class="nc-c"><div class="nc-line">
+                <label class="radio"><input type="radio" name="nc_tax" value="taxable" checked> Taxable</label>
+                <label class="radio"><input type="radio" name="nc_tax" value="exempt"> Tax Exempt</label>
+              </div></div>
+            </div>
+            <div class="nc-row" id="ncExemptRow" hidden>
+              <label class="nc-l req" for="nc_exemption">Exemption Reason*</label>
+              <div class="nc-c"><select id="nc_exemption" class="w-main"></select></div>
             </div>
 
-            <div class="field">
-              <label for="soDate">Sales order date <span class="req">*</span></label>
-              <input type="date" id="soDate">
+            <div class="nc-row">
+              <label class="nc-l" for="nc_currency">Currency</label>
+              <div class="nc-c"><select id="nc_currency" class="w-main"></select></div>
+            </div>
+            <div class="nc-row" id="ncArRow" hidden>
+              <label class="nc-l" for="nc_receivable">Accounts Receivable</label>
+              <div class="nc-c"><select id="nc_receivable" class="w-main"></select></div>
             </div>
 
-            <div class="field">
-              <label for="shipDate">Expected shipment date</label>
-              <input type="date" id="shipDate">
+            <div class="nc-row">
+              <label class="nc-l">Opening Balance</label>
+              <div class="nc-c"><div class="nc-line">
+                <select id="nc_obLoc" class="w-loc" hidden></select>
+                <div class="addon"><span id="nc_obCur" class="addon-t">INR</span><input type="text" id="nc_obAmt" inputmode="decimal"></div>
+              </div></div>
             </div>
-
-            <div class="field">
-              <label for="payTerms">Payment terms</label>
-              <select id="payTerms"></select>
+            <div class="nc-row">
+              <label class="nc-l">Credit Limit</label>
+              <div class="nc-c"><div class="addon w-main"><span id="nc_crCur" class="addon-t">INR</span><input type="text" id="nc_credit" inputmode="decimal"></div></div>
             </div>
-
-            <div class="field">
-              <label for="delivery">Delivery method</label>
-              <input type="text" id="delivery" maxlength="100">
+            <div class="nc-row">
+              <label class="nc-l" for="nc_terms">Payment Terms</label>
+              <div class="nc-c"><select id="nc_terms" class="w-main"></select></div>
             </div>
-
-            <div class="field" id="spWrap" hidden>
-              <label for="salesperson">Salesperson</label>
-              <select id="salesperson"></select>
+            <div class="nc-row">
+              <label class="nc-l" for="nc_priceList">Price List</label>
+              <div class="nc-c"><select id="nc_priceList" class="w-main"></select></div>
             </div>
-
-            <div class="field">
-              <label for="currencyText">Currency</label>
-              <input type="text" id="currencyText" readonly>
-              <div class="hint">Follows the selected customer.</div>
+            <div class="nc-row">
+              <label class="nc-l">Enable Portal?</label>
+              <div class="nc-c"><label class="radio"><input type="checkbox" id="nc_portal"> Allow portal access for this customer</label></div>
             </div>
-
-            <div class="field" id="exchWrap" hidden>
-              <label for="exchRate">Exchange rate <span class="req">*</span></label>
-              <input type="text" id="exchRate" inputmode="decimal">
-            </div>
-
-          </div>
-        </section>
-
-        <!-- ========== Custom fields ========== -->
-        <section class="card" id="cfCard" hidden>
-          <h2>Custom fields</h2>
-          <div class="grid" id="cfGrid"></div>
-          <div class="hint">Custom fields are read from your most recent sales order.</div>
-        </section>
-
-        <!-- ========== Items ========== -->
-        <section class="card">
-          <div class="card-head">
-            <h2>Items</h2>
-            <div class="opts">
-              <label class="chk"><input type="checkbox" id="inclusive"> Rates are tax inclusive</label>
-              <label class="sel">Discount
-                <select id="discLevel">
-                  <option value="item_level">At line item level</option>
-                  <option value="entity_level">At transaction level</option>
-                </select>
-              </label>
-            </div>
-          </div>
-
-          <div class="item-toolbar">
-            <div class="field" id="locWrap" hidden>
-              <label for="location">Warehouse Location <span class="req">*</span></label>
-              <select id="location"></select>
-            </div>
-            <div class="field" id="plWrap" hidden>
-              <label for="priceList">Price List</label>
-              <select id="priceList"></select>
-            </div>
-          </div>
-
-          <div class="table-wrap">
-            <table class="items" id="items">
-              <thead>
-                <tr>
-                  <th class="c-n">#</th>
-                  <th class="c-item">Item details</th>
-                  <th class="c-brand">Brand</th>
-                  <th class="c-brand">Sub-brand</th>
-                  <th class="c-num">Quantity</th>
-                  <th class="c-num">Rate</th>
-                  <th class="c-disc" id="thDisc">Discount</th>
-                  <th class="c-tax">Tax</th>
-                  <th class="c-amt">Amount</th>
-                  <th class="c-x"></th>
-                </tr>
-              </thead>
-              <!-- one <tbody> per item row is added by extension.js -->
-            </table>
-          </div>
-          <button type="button" id="btnAddRow" class="btn ghost">+ Add new row</button>
-          <div class="hint" id="rowNotice"></div>
-        </section>
-
-        <!-- ========== Notes + totals ========== -->
-        <section class="card two-col">
-          <div>
-            <div class="field">
-              <label for="notes">Customer notes</label>
-              <textarea id="notes" rows="3"></textarea>
-            </div>
-            <div class="field">
-              <label for="terms">Terms &amp; conditions</label>
-              <textarea id="terms" rows="3"></textarea>
-            </div>
-          </div>
-
-          <div class="totals" aria-live="polite">
-            <div class="t-row" id="entityDiscRow" hidden>
-              <label for="entityDisc">Discount (e.g. 10 or 10%)</label>
-              <input type="text" id="entityDisc" inputmode="decimal">
-              <label class="chk small"><input type="checkbox" id="beforeTax" checked> Apply before tax</label>
-            </div>
-            <div class="t-row"><span>Sub total</span><b id="tSub">0.00</b></div>
-            <div class="t-row" id="tDiscRow" hidden><span>Discount</span><b id="tDisc">0.00</b></div>
-            <div id="tTaxes"></div>
-            <div class="t-row">
-              <label for="shipping">Shipping charges</label>
-              <input type="text" id="shipping" inputmode="decimal" placeholder="0.00">
-            </div>
-            <div class="t-row">
-              <label for="adjustment">Adjustment</label>
-              <input type="text" id="adjustment" inputmode="decimal" placeholder="0.00">
-            </div>
-            <div class="t-row">
-              <label for="adjDesc">Adjustment note</label>
-              <input type="text" id="adjDesc" maxlength="100">
-            </div>
-            <div class="t-row grand"><span>Total (<span id="tCur"></span>)</span><b id="tTotal">0.00</b></div>
-            <div class="hint">Estimated here. Zoho Books calculates the final totals when the order is created.</div>
-          </div>
-        </section>
-
-        <!-- ========== Addresses ========== -->
-        <details class="card" id="addrCard">
-          <summary>Billing &amp; shipping address</summary>
-          <div class="two-col addr">
-            <fieldset id="fsBilling"><legend>Billing address</legend></fieldset>
-            <fieldset id="fsShipping"><legend>Shipping address</legend></fieldset>
-          </div>
-          <div class="hint">Filled from the customer. Only addresses you edit here are sent with the order.</div>
-        </details>
-
-        <div id="summary" class="banner" role="alert" hidden></div>
-      </form>
-    </div>
-
-    <footer class="bar">
-      <span id="status" class="status" aria-live="polite"></span>
-      <button type="button" id="btnSubmit" class="btn primary">Create sales order</button>
-    </footer>
-  </div>
-
-  <!-- Success -->
-  <div id="success" class="center-panel" hidden>
-    <div class="tick" aria-hidden="true">&#10003;</div>
-    <h2 id="okTitle">Sales order created</h2>
-    <p id="okDetail"></p>
-    <p class="hint" id="okNote"></p>
-    <button type="button" id="btnClose" class="btn primary">Close</button>
-  </div>
-
-  <!-- Shared dropdown for item lookups -->
-  <div id="combo" class="combo" role="listbox" hidden></div>
-
-  <!-- ========== New Customer modal (mirrors the native Zoho Books form) ========== -->
-  <div id="newCustModal" class="modal-overlay" hidden>
-    <div class="modal-box nc-box" role="dialog" aria-modal="true" aria-labelledby="newCustTitle">
-      <div class="modal-head">
-        <h3 id="newCustTitle">New Customer</h3>
-        <button type="button" class="modal-close" id="newCustClose" aria-label="Close">&times;</button>
-      </div>
-
-      <div class="modal-body nc-body">
-        <div class="nc-row">
-          <label class="nc-l">Customer Type</label>
-          <div class="nc-c"><div class="nc-line">
-            <label class="radio"><input type="radio" name="nc_type" value="business" checked> Business</label>
-            <label class="radio"><input type="radio" name="nc_type" value="individual"> Individual</label>
-          </div></div>
-        </div>
-
-        <div class="nc-row">
-          <label class="nc-l">Primary Contact</label>
-          <div class="nc-c">
-            <div class="nc-line">
-              <select id="nc_salutation" class="w-sal">
-                <option value="">Salutation</option>
-                <option value="Mr.">Mr.</option>
-                <option value="Mrs.">Mrs.</option>
-                <option value="Ms.">Ms.</option>
-                <option value="Miss.">Miss.</option>
-                <option value="Dr.">Dr.</option>
-              </select>
-              <input type="text" id="nc_firstName" placeholder="First Name" class="w-name">
-              <input type="text" id="nc_lastName" placeholder="Last Name" class="w-name">
-            </div>
-            <div class="hint">Last Name is mandatory to sync this contact with Zoho CRM.</div>
-          </div>
-        </div>
-
-        <div class="nc-row">
-          <label class="nc-l" for="nc_companyName">Company Name</label>
-          <div class="nc-c"><input type="text" id="nc_companyName" class="w-main"></div>
-        </div>
-
-        <div class="nc-row">
-          <label class="nc-l req" for="nc_displayName">Display Name*</label>
-          <div class="nc-c">
-            <input type="text" id="nc_displayName" class="w-main" list="ncDisplayList" placeholder="Select or type to add" autocomplete="off">
-            <datalist id="ncDisplayList"></datalist>
-          </div>
-        </div>
-
-        <div class="nc-row">
-          <label class="nc-l" for="nc_email">Email Address</label>
-          <div class="nc-c"><input type="text" id="nc_email" class="w-main" inputmode="email" autocomplete="off"></div>
-        </div>
-
-        <div class="nc-row">
-          <label class="nc-l">Phone</label>
-          <div class="nc-c"><div class="nc-line">
-            <select id="nc_workCode" class="w-code"></select>
-            <input type="text" id="nc_workPhone" placeholder="Work Phone" class="w-ph" inputmode="tel">
-            <select id="nc_mobCode" class="w-code"></select>
-            <input type="text" id="nc_mobile" placeholder="Mobile" class="w-ph" inputmode="tel">
-          </div></div>
-        </div>
-
-        <div class="nc-row">
-          <label class="nc-l" for="nc_language">Customer Language</label>
-          <div class="nc-c"><select id="nc_language" class="w-main"></select></div>
-        </div>
-
-        <div class="nc-tabs" role="tablist">
-          <button type="button" class="nc-tab active" data-pane="other">Other Details</button>
-          <button type="button" class="nc-tab" data-pane="address">Address</button>
-          <button type="button" class="nc-tab" data-pane="cf">Custom Fields</button>
-          <button type="button" class="nc-tab" data-pane="tags">Reporting Tags</button>
-          <button type="button" class="nc-tab" data-pane="remarks">Remarks</button>
-        </div>
-
-        <!-- Other details -->
-        <div class="nc-pane" data-pane="other">
-          <div class="nc-row gst-only">
-            <label class="nc-l req" for="nc_gstTreatmentText">GST Treatment*</label>
-            <div class="nc-c rs-wrap" id="rsGst">
-              <div class="rs-box" id="rsGstBox">
-                <input type="text" id="nc_gstTreatmentText" readonly placeholder="Select a GST treatment" autocomplete="off">
-                <span class="cust-chev" aria-hidden="true"></span>
-              </div>
-              <input type="hidden" id="nc_gstTreatment" value="">
-              <div class="rs-panel" id="rsGstPanel" hidden>
-                <div class="cust-search">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8a94a6" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
-                  <input type="text" id="rsGstSearch" placeholder="Search" autocomplete="off">
-                </div>
-                <div class="rs-list" id="rsGstList" role="listbox"></div>
+            <div class="nc-row">
+              <label class="nc-l">Documents</label>
+              <div class="nc-c">
+                <button type="button" class="btn" disabled>Upload File</button>
+                <div class="hint">Attachments cannot be uploaded from this widget.</div>
               </div>
             </div>
-          </div>
 
-          <div class="nc-row gst-only gst-reg" id="ncGstinRow" hidden>
-            <label class="nc-l req" for="nc_gstin" id="ncGstinLbl">GSTIN / UIN*</label>
-            <div class="nc-c"><input type="text" id="nc_gstin" class="w-main" maxlength="15" autocomplete="off"></div>
-          </div>
-          <div class="nc-row gst-only gst-reg" id="ncLegalRow" hidden>
-            <label class="nc-l" for="nc_legalName">Business Legal Name</label>
-            <div class="nc-c"><input type="text" id="nc_legalName" class="w-main" maxlength="200"></div>
-          </div>
-          <div class="nc-row gst-only gst-reg" id="ncTradeRow" hidden>
-            <label class="nc-l" for="nc_tradeName">Business Trade Name</label>
-            <div class="nc-c"><input type="text" id="nc_tradeName" class="w-main" maxlength="200"></div>
-          </div>
-          <div class="nc-row gst-only">
-            <label class="nc-l req" for="nc_pos">Place of Supply*</label>
-            <div class="nc-c"><select id="nc_pos" class="w-main"></select></div>
-          </div>
-          <div class="nc-row gst-only">
-            <label class="nc-l" for="nc_pan">PAN</label>
-            <div class="nc-c"><input type="text" id="nc_pan" class="w-main" maxlength="10"></div>
-          </div>
-
-          <div class="nc-row">
-            <label class="nc-l req">Tax Preference*</label>
-            <div class="nc-c"><div class="nc-line">
-              <label class="radio"><input type="radio" name="nc_tax" value="taxable" checked> Taxable</label>
-              <label class="radio"><input type="radio" name="nc_tax" value="exempt"> Tax Exempt</label>
-            </div></div>
-          </div>
-          <div class="nc-row" id="ncExemptRow" hidden>
-            <label class="nc-l req" for="nc_exemption">Exemption Reason*</label>
-            <div class="nc-c"><select id="nc_exemption" class="w-main"></select></div>
-          </div>
-
-          <div class="nc-row">
-            <label class="nc-l" for="nc_currency">Currency</label>
-            <div class="nc-c"><select id="nc_currency" class="w-main"></select></div>
-          </div>
-          <div class="nc-row" id="ncArRow" hidden>
-            <label class="nc-l" for="nc_receivable">Accounts Receivable</label>
-            <div class="nc-c"><select id="nc_receivable" class="w-main"></select></div>
-          </div>
-
-          <div class="nc-row">
-            <label class="nc-l">Opening Balance</label>
-            <div class="nc-c"><div class="nc-line">
-              <select id="nc_obLoc" class="w-loc" hidden></select>
-              <div class="addon"><span id="nc_obCur" class="addon-t">INR</span><input type="text" id="nc_obAmt" inputmode="decimal"></div>
-            </div></div>
-          </div>
-          <div class="nc-row">
-            <label class="nc-l">Credit Limit</label>
-            <div class="nc-c"><div class="addon w-main"><span id="nc_crCur" class="addon-t">INR</span><input type="text" id="nc_credit" inputmode="decimal"></div></div>
-          </div>
-          <div class="nc-row">
-            <label class="nc-l" for="nc_terms">Payment Terms</label>
-            <div class="nc-c"><select id="nc_terms" class="w-main"></select></div>
-          </div>
-          <div class="nc-row">
-            <label class="nc-l" for="nc_priceList">Price List</label>
-            <div class="nc-c"><select id="nc_priceList" class="w-main"></select></div>
-          </div>
-          <div class="nc-row">
-            <label class="nc-l">Enable Portal?</label>
-            <div class="nc-c"><label class="radio"><input type="checkbox" id="nc_portal"> Allow portal access for this customer</label></div>
-          </div>
-          <div class="nc-row">
-            <label class="nc-l">Documents</label>
-            <div class="nc-c">
-              <button type="button" class="btn" disabled title="File upload is not available from this widget">Upload File</button>
-              <div class="hint">Attachments cannot be uploaded from this widget. Add them in Zoho Books after saving.</div>
+            <div class="nc-more-link"><button type="button" id="ncMoreLink" class="linkbtn">Add more details</button></div>
+            <div id="ncMore" hidden>
+              <div class="nc-row"><label class="nc-l" for="nc_website">Website URL</label><div class="nc-c"><input type="text" id="nc_website" class="w-main"></div></div>
+              <div class="nc-row"><label class="nc-l" for="nc_dept">Department</label><div class="nc-c"><input type="text" id="nc_dept" class="w-main"></div></div>
+              <div class="nc-row"><label class="nc-l" for="nc_desig">Designation</label><div class="nc-c"><input type="text" id="nc_desig" class="w-main"></div></div>
+              <div class="nc-row"><label class="nc-l" for="nc_twitter">X</label><div class="nc-c"><input type="text" id="nc_twitter" class="w-main"></div></div>
+              <div class="nc-row"><label class="nc-l" for="nc_skype">Skype Name/Number</label><div class="nc-c"><input type="text" id="nc_skype" class="w-main"></div></div>
+              <div class="nc-row"><label class="nc-l" for="nc_facebook">Facebook</label><div class="nc-c"><input type="text" id="nc_facebook" class="w-main"></div></div>
             </div>
           </div>
 
-          <div class="nc-more-link"><button type="button" id="ncMoreLink" class="linkbtn">Add more details</button></div>
-          <div id="ncMore" hidden>
-            <div class="nc-row"><label class="nc-l" for="nc_website">Website URL</label><div class="nc-c"><input type="text" id="nc_website" class="w-main" placeholder="ex: www.zylker.com"></div></div>
-            <div class="nc-row"><label class="nc-l" for="nc_dept">Department</label><div class="nc-c"><input type="text" id="nc_dept" class="w-main"></div></div>
-            <div class="nc-row"><label class="nc-l" for="nc_desig">Designation</label><div class="nc-c"><input type="text" id="nc_desig" class="w-main"></div></div>
-            <div class="nc-row"><label class="nc-l" for="nc_twitter">X</label><div class="nc-c"><input type="text" id="nc_twitter" class="w-main"><div class="hint">https://x.com/</div></div></div>
-            <div class="nc-row"><label class="nc-l" for="nc_skype">Skype Name/Number</label><div class="nc-c"><input type="text" id="nc_skype" class="w-main"></div></div>
-            <div class="nc-row"><label class="nc-l" for="nc_facebook">Facebook</label><div class="nc-c"><input type="text" id="nc_facebook" class="w-main"><div class="hint">http://www.facebook.com/</div></div></div>
-          </div>
-        </div>
-
-        <!-- Address -->
-        <div class="nc-pane" data-pane="address" hidden>
-          <div class="nc-addr">
-            <div>
-              <h4>Billing Address</h4>
-              <div id="ncBilling" class="nc-addr-grid"></div>
-            </div>
-            <div>
-              <h4>Shipping Address <button type="button" id="ncCopyBilling" class="linkbtn">&#8595; Copy billing address</button></h4>
-              <div id="ncShipping" class="nc-addr-grid"></div>
+          <div class="nc-pane" data-pane="address" hidden>
+            <div class="nc-addr">
+              <div><h4>Billing Address</h4><div id="ncBilling" class="nc-addr-grid"></div></div>
+              <div><h4>Shipping Address <button type="button" id="ncCopyBilling" class="linkbtn">&#8595; Copy billing address</button></h4><div id="ncShipping" class="nc-addr-grid"></div></div>
             </div>
           </div>
-        </div>
 
-        <!-- Custom fields -->
-        <div class="nc-pane" data-pane="cf" hidden>
-          <div id="ncCf"></div>
-          <div class="hint" id="ncCfHint"></div>
-        </div>
-
-        <!-- Reporting tags -->
-        <div class="nc-pane" data-pane="tags" hidden>
-          <div id="ncTags"></div>
-        </div>
-
-        <!-- Remarks -->
-        <div class="nc-pane" data-pane="remarks" hidden>
-          <div class="field">
-            <label for="nc_remarks">Remarks (For Internal Use)</label>
-            <textarea id="nc_remarks" rows="4"></textarea>
+          <div class="nc-pane" data-pane="cf" hidden><div id="ncCf"></div><div class="hint" id="ncCfHint"></div></div>
+          <div class="nc-pane" data-pane="tags" hidden><div id="ncTags"></div></div>
+          <div class="nc-pane" data-pane="remarks" hidden>
+            <div class="field"><label for="nc_remarks">Remarks (For Internal Use)</label><textarea id="nc_remarks" rows="4"></textarea></div>
           </div>
         </div>
-      </div>
 
-      <div class="modal-foot">
-        <span class="status" id="newCustStatus"></span>
-        <button type="button" class="btn primary" id="newCustSave">Save</button>
-        <button type="button" class="btn" id="newCustCancel">Cancel</button>
+        <div class="modal-foot">
+          <span class="status" id="newCustStatus"></span>
+          <button type="button" class="btn primary" id="newCustSave">Save</button>
+          <button type="button" class="btn" id="newCustCancel">Cancel</button>
+        </div>
       </div>
     </div>
-  </div>
 
-  <!-- ========== New Payment Term popup ========== -->
-  <div id="ptModal" class="modal-overlay pt-overlay" hidden>
-    <div class="modal-box pt-box" role="dialog" aria-modal="true" aria-labelledby="ptTitle">
-      <div class="modal-head pt-head">
-        <h3 id="ptTitle">New Payment Term</h3>
-        <button type="button" class="pt-x" id="ptClose" aria-label="Close">&times;</button>
-      </div>
-      <div class="modal-body nc-body pt-body">
-        <div class="nc-row">
-          <label class="nc-l req" for="pt_name">Term Name*</label>
-          <div class="nc-c"><input type="text" id="pt_name" class="w-main" maxlength="100" autocomplete="off"></div>
+    <!-- ========== New Payment Term popup ========== -->
+    <div id="ptModal" class="modal-overlay pt-overlay" hidden>
+      <div class="modal-box pt-box" role="dialog" aria-modal="true">
+        <div class="modal-head pt-head">
+          <h3 id="ptTitle">New Payment Term</h3>
+          <button type="button" class="pt-x" id="ptClose" aria-label="Close">&times;</button>
         </div>
-        <div class="nc-row">
-          <label class="nc-l req" for="pt_days">Due After*</label>
-          <div class="nc-c">
-            <div class="addon addon-r w-main">
-              <input type="text" id="pt_days" inputmode="numeric" autocomplete="off">
-              <span class="addon-t">Days</span>
-            </div>
-          </div>
+        <div class="modal-body nc-body pt-body">
+          <div class="nc-row"><label class="nc-l req" for="pt_name">Term Name*</label><div class="nc-c"><input type="text" id="pt_name" class="w-main" maxlength="100" autocomplete="off"></div></div>
+          <div class="nc-row"><label class="nc-l req" for="pt_days">Due After*</label><div class="nc-c"><div class="addon addon-r w-main"><input type="text" id="pt_days" inputmode="numeric"><span class="addon-t">Days</span></div></div></div>
+        </div>
+        <div class="modal-foot pt-foot">
+          <button type="button" class="btn pt-save" id="ptSave">Save</button>
+          <button type="button" class="btn" id="ptCancel">Cancel</button>
+          <span class="status" id="ptStatus"></span>
         </div>
       </div>
-      <div class="modal-foot pt-foot">
-        <button type="button" class="btn pt-save" id="ptSave">Save</button>
-        <button type="button" class="btn" id="ptCancel">Cancel</button>
-        <span class="status" id="ptStatus"></span>
+    </div>
+
+    <!-- ========== New Item modal ========== -->
+    <div id="itemModal" class="modal-overlay" hidden>
+      <div class="modal-box ni-box" role="dialog" aria-modal="true">
+        <div class="modal-head">
+          <h3 id="niTitle">New Item</h3>
+          <button type="button" class="modal-close" id="niClose" aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-body nc-body" id="niBody"></div>
+        <div class="modal-foot">
+          <button type="button" class="btn primary" id="niSave">Save</button>
+          <button type="button" class="btn" id="niCancel">Cancel</button>
+          <span class="status" id="niStatus"></span>
+        </div>
       </div>
     </div>
-  </div>
 
-  <!-- ========== New Item modal (body is built by extension.js) ========== -->
-  <div id="itemModal" class="modal-overlay" hidden>
-    <div class="modal-box ni-box" role="dialog" aria-modal="true" aria-labelledby="niTitle">
-      <div class="modal-head">
-        <h3 id="niTitle">New Item</h3>
-        <button type="button" class="modal-close" id="niClose" aria-label="Close">&times;</button>
-      </div>
-      <div class="modal-body nc-body" id="niBody"></div>
-      <div class="modal-foot">
-        <button type="button" class="btn primary" id="niSave">Save</button>
-        <button type="button" class="btn" id="niCancel">Cancel</button>
-        <span class="status" id="niStatus"></span>
-      </div>
-    </div>
-  </div>
-
-  <script src="js/extension.js"></script>
-</body>
-</html>
+    <script src="js/extension.js"></script>
+  </body>
+  </html>
